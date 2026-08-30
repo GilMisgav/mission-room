@@ -502,7 +502,7 @@
     <h3>Shape of the run</h3>
     <div class="row">
       <div class="narrow"><label class="f" data-tip="fx.count" tabindex="0">Configs</label><input type="number" id="fxN" value="24" min="1" max="60"></div>
-      <div class="narrow"><label class="f" data-tip="cmp.days" tabindex="0">Days</label><input type="number" id="fxDays" value="3" min="1" max="14"></div>
+      <div class="narrow"><label class="f" data-tip="cmp.days" tabindex="0">Days</label><input type="number" id="fxDays" value="3" min="1" max="30"></div>
       <div class="narrow"><label class="f" data-tip="b.dailyCap" tabindex="0">Missions / day</label><input type="number" id="fxCap" value="5" min="1" max="10"></div>
       <div class="narrow"><label class="f" data-tip="fx.visible" tabindex="0">Visible slots</label><input type="number" id="fxVis" value="3" min="1" max="10"></div>
       <div class="narrow"><label class="f" data-tip="cmp.comfort" tabindex="0">Comfort %</label><input type="number" id="fxComfort" value="70" min="0" max="100"></div>
@@ -521,10 +521,22 @@
     <div id="fxTypes"></div>
     <h3 style="margin-top:16px" data-tip="fx.schedule" tabindex="0">Per-day schedule</h3>
     <div id="fxDayPlan"></div>
+    <div class="btnrow" style="margin-top:8px">
+      <button class="act ghost sm" id="fxAddDay">+ Add day</button>
+      <button class="act ghost sm" id="fxDelDay">− Remove last day</button>
+      <button class="act ghost sm" id="fxRamp">Ramp the effort</button>
+      <button class="act ghost sm" id="fxFlat">Flatten</button>
+    </div>
     <h3 style="margin-top:16px">What varies across the grid</h3>
     <div class="row">
-      <div class="narrow"><label class="f" data-tip="fx.effort" tabindex="0">Effort from</label><input type="number" step="0.05" id="fxEffMin" value="0.4"></div>
-      <div class="narrow"><label class="f" data-tip="fx.effort" tabindex="0">to</label><input type="number" step="0.05" id="fxEffMax" value="1.3"></div>
+      <div><label class="f" data-tip="fx.mode" tabindex="0">Difficulty dial</label><select id="fxMode">
+        <option value="completion" selected>Target completion % — say what should be reachable</option>
+        <option value="effort">Effort × — share of the expected count</option>
+      </select></div>
+      <div class="narrow" data-dial="completion"><label class="f" data-tip="fx.completion" tabindex="0">Completion % from</label><input type="number" id="fxCompMin" value="95" min="1" max="99"></div>
+      <div class="narrow" data-dial="completion"><label class="f" data-tip="fx.completion" tabindex="0">to</label><input type="number" id="fxCompMax" value="45" min="1" max="99"></div>
+      <div class="narrow" data-dial="effort" style="display:none"><label class="f" data-tip="fx.effort" tabindex="0">Effort from</label><input type="number" step="0.05" id="fxEffMin" value="0.4"></div>
+      <div class="narrow" data-dial="effort" style="display:none"><label class="f" data-tip="fx.effort" tabindex="0">to</label><input type="number" step="0.05" id="fxEffMax" value="1.3"></div>
       <div class="narrow"><label class="f" data-tip="fx.budgetmul" tabindex="0">Budget × from</label><input type="number" step="0.1" id="fxBudMin" value="0.5"></div>
       <div class="narrow"><label class="f" data-tip="fx.budgetmul" tabindex="0">to</label><input type="number" step="0.1" id="fxBudMax" value="2"></div>
       <div class="narrow"><label class="f" data-tip="fx.players" tabindex="0">Sim players</label><input type="number" id="fxPlayers" value="400" min="50" max="3000" step="50"></div>
@@ -3397,8 +3409,11 @@ function buildConfig(spec, rates, tierOf){
     clean.sort((a, b) => (rates[b] || 0) - (rates[a] || 0));
     dayList.push({matches: dayMatches, budget: plan[d].budget * budgetMul, chest: !!plan[d].chest,
       missions: clean.map((t, i) => {
-        const expected = (rates[t] || 0) * dayMatches;
-        return {index: i + 1, type: t, target: clampTarget(expected * effort, spec),
+        const lambda = (rates[t] || 0) * dayMatches;
+        return {index: i + 1, type: t,
+          target: spec.mode === 'completion'
+            ? solveTargetForCompletion(lambda, spec.completion, spec)
+            : clampTarget(lambda * effort, spec),
           tokens: TOKENS[tierOf(t)] || 8, bonusCash: 0};
       })});
   }
@@ -3412,7 +3427,10 @@ function buildConfig(spec, rates, tierOf){
     dayList.forEach((d, di) => d.missions.forEach((m, si) => {
       const open = Math.max(1, exp[di][si]);
       m.openMatches = +open.toFixed(1);
-      m.target = clampTarget((rates[m.type] || 0) * open * effort, spec);
+      const lambda = (rates[m.type] || 0) * open;
+      m.target = spec.mode === 'completion'
+        ? solveTargetForCompletion(lambda, spec.completion, spec)
+        : clampTarget(lambda * effort, spec);
     }));
   } else {
     dayList.forEach(d => d.missions.forEach(m => { m.openMatches = d.matches; }));
@@ -3459,6 +3477,19 @@ function clampTarget(raw, spec){
   return Math.min(hi, Math.max(lo, Math.round(raw)));
 }
 
+// The inverse of the effort dial. `effort` says "ask for this share of the expected
+// count", which fixes completion as a side effect — effort 1.0 lands near 50% no
+// matter what, because the target IS the mean. This solves the other way round:
+// the largest target that still leaves at least `p` of players completing it.
+function solveTargetForCompletion(lambda, p, spec){
+  if (!(lambda > 0)) return clampTarget(1, spec);
+  let best = 1;
+  for (let t = 1; t <= 400; t++){
+    if (poissonTail(t, lambda) >= p) best = t; else break;
+  }
+  return clampTarget(best, spec);
+}
+
 // Poisson tail P(X >= k), shared with the app's closed-form estimator
 function poissonTail(k, lambda){
   if (k <= 0) return 1;
@@ -3480,19 +3511,22 @@ function generateGrid(base, rates, tierOf, opts){
   const out = [];
   for (let r = 0; r < rows && out.length < n; r++){
     for (let c = 0; c < cols && out.length < n; c++){
-      const effort = +lerp(opts.effortMin, opts.effortMax, c, cols).toFixed(3);
       const budgetMul = +lerp(opts.budgetMin, opts.budgetMax, r, rows).toFixed(3);
-      const spec = {...base, effort, budgetMul};
+      const isComp = base.mode === 'completion';
+      const effort = isComp ? 1 : +lerp(opts.effortMin, opts.effortMax, c, cols).toFixed(3);
+      const completion = isComp
+        ? +lerp(opts.completionMin, opts.completionMax, c, cols).toFixed(3) : base.completion;
+      const spec = {...base, effort, completion, budgetMul};
       const cfg = buildConfig(spec, rates, tierOf);
       const budget = +cfg.days.reduce((a, d) => a + d.budget, 0).toFixed(2);
-      out.push({id: out.length + 1, effort, budgetMul, budget, cfg});
+      out.push({id: out.length + 1, effort, completion, budgetMul, budget, cfg});
     }
   }
   return out;
 }
 
 const API = {poissonSample, simulatePlayer, simulateConfig, buildConfig, generateGrid,
-  poissonTail, measureExposure, clampTarget};
+  poissonTail, measureExposure, clampTarget, solveTargetForCompletion};
 if (typeof module !== 'undefined' && module.exports) module.exports = API;
 else root.MissionFactory = API;
 
@@ -3547,6 +3581,8 @@ const TIP = {
   'fx.dayBudget': '<span class="h">bonus cash $</span>Money this day hands out — split across its missions, and into its chest if it has one. This is the designed figure; what it actually pays depends on completion and is in the cost column.',
   'fx.dayChest': '<span class="h">chest</span>Whether a chest lands at the end of this day, set at the tokens the run is expected to have reached by then. Between 2 and 5 chests total (rule 11).',
   'fx.budgetmul': '<span class="h">Budget ×</span>Multiplier over the whole per-day money schedule. 0.5× halves every day, 2× doubles it — the shape you authored is kept, only the scale varies across the grid.',
+  'fx.mode': '<span class="h">Difficulty dial</span><b>Target completion %</b> solves each target so roughly that share of players finish it — say what you want and it works backwards. <b>Effort ×</b> asks for a share of the expected count instead, which fixes completion as a side effect: effort 1.0 always lands near 50%, because the target is the average.',
+  'fx.completion': '<span class="h">Completion %</span>The share of players who should finish each mission. The grid varies it across the columns, so you see the whole difficulty range at once. Delivered completion runs a little under the asked figure — a mission that uncovers late gets less of the day than the solve assumed.',
   'fx.targetMin': '<span class="h">Target min</span>Floor on every generated target. 1 is the natural floor — a target of 0 is not a mission.',
   'fx.targetMax': '<span class="h">Target max</span>Ceiling on every generated target. Without one, a type that fires 4.6 times a match asks for 120 of something on a 20-match day — arithmetically right, unreadable as a mission.',
   'fx.open': '<span class="h">open for</span>Matches this slot is actually open, measured by a calibration pass. Slots past the visible count start covered, so they get a fraction of the day — and their targets are sized against that fraction, not the whole day.',
@@ -5562,7 +5598,7 @@ document.addEventListener('click', e => {
 // preserving anything already typed.
 let fxDayPlan = [];
 function fxSyncDayPlan(){
-  const days = Math.max(1, Math.min(14, +$('#fxDays').value || 3));
+  const days = Math.max(1, Math.min(30, +$('#fxDays').value || 3));
   const old = fxDayPlan;
   fxDayPlan = Array.from({length: days}, (_, i) => old[i] || {
     matches: 8, budget: 1, chest: days <= 5 ? true : (i + 1) % Math.ceil(days / 5) === 0,
@@ -5612,6 +5648,28 @@ $('#fxDayPlan').addEventListener('input', e => {
   renderFxDayPlan(); renderFactoryHint();
 });
 $('#fxDays').addEventListener('input', fxSyncDayPlan);
+$('#fxAddDay').addEventListener('click', () => {
+  $('#fxDays').value = Math.min(30, fxDayPlan.length + 1); fxSyncDayPlan(); renderFactoryHint();
+});
+$('#fxDelDay').addEventListener('click', () => {
+  $('#fxDays').value = Math.max(1, fxDayPlan.length - 1); fxSyncDayPlan(); renderFactoryHint();
+});
+$('#fxRamp').addEventListener('click', () => {
+  const n = fxDayPlan.length;
+  fxDayPlan.forEach((d, i) => { d.matches = Math.round(6 + (24 - 6) * (n === 1 ? 0 : i / (n - 1)));
+    d.budget = +(0.4 + (2.6 - 0.4) * (n === 1 ? 0 : i / (n - 1))).toFixed(1); });
+  renderFxDayPlan(); renderFactoryHint();
+});
+$('#fxFlat').addEventListener('click', () => {
+  fxDayPlan.forEach(d => { d.matches = 10; d.budget = 1; });
+  renderFxDayPlan(); renderFactoryHint();
+});
+// swap which pair of axis inputs is showing
+$('#fxMode').addEventListener('change', () => {
+  const m = $('#fxMode').value;
+  $$('[data-dial]').forEach(el => { el.style.display = el.dataset.dial === m ? '' : 'none'; });
+  renderFactoryHint();
+});
 
 function fxSpec(){
   const cap = Math.max(1, Math.min(10, +$('#fxCap').value || 5));
@@ -5626,6 +5684,9 @@ function fxSpec(){
     claimRate: (+$('#fxClaim').value || 85) / 100,
     targetMin: Math.max(1, +$('#fxTgtMin').value || 1),
     targetMax: Math.max(1, +$('#fxTgtMax').value || 20),
+    mode: $('#fxMode').value,
+    completionMin: (+$('#fxCompMin').value || 95) / 100,
+    completionMax: (+$('#fxCompMax').value || 45) / 100,
     players: Math.max(50, +$('#fxPlayers').value || 400),
     effortMin: +$('#fxEffMin').value || 0.4, effortMax: +$('#fxEffMax').value || 1.3,
     budgetMin: +$('#fxBudMin').value || 0.5, budgetMax: +$('#fxBudMax').value || 4,
@@ -5645,7 +5706,14 @@ function renderFactoryHint(){
          earlier ones complete. Targets for the covered slots are sized against the matches they are
          actually open for, measured by a calibration pass — not the whole day, which they never get.`
       : 'Every mission is open from the start.'}
-      Targets clamped to ${sp.targetMin}–${sp.targetMax}.`;
+      Targets clamped to ${sp.targetMin}–${sp.targetMax}.
+      <br>${sp.mode === 'completion'
+        ? `Targets are solved so roughly the asked-for share of players finish each mission. The
+           delivered figure lands slightly under it, because a mission that uncovers late gets less of
+           the day than the solve assumed.`
+        : `<b>Effort is target ÷ expected count</b>, so effort 1.0 sits near 50% completion by
+           construction — the target <i>is</i> the average. Use 0.4–0.6 for a chain most players clear,
+           or switch the dial to target completion % and say it directly.`}`;
 }
 ['#fxN','#fxCap','#fxVis','#fxComfort','#fxClaim','#fxTgtMin','#fxTgtMax',
  '#fxEffMin','#fxEffMax','#fxBudMin','#fxBudMax','#fxPlayers']
@@ -5673,7 +5741,8 @@ $('#fxGo').addEventListener('click', () => {
   setTimeout(() => {
     const t0 = Date.now();
     const base = {dailyCap: sp.dailyCap, visibleSlots: sp.visibleSlots,
-      dayPlan: sp.dayPlan, comfort: sp.comfort, pool,
+      dayPlan: sp.dayPlan, comfort: sp.comfort, pool, mode: sp.mode,
+      completion: sp.completionMin,
       targetMin: sp.targetMin, targetMax: sp.targetMax};
     const grid = F.generateGrid(base, rates, tierOf, sp);
     grid.forEach(g => {
@@ -5701,7 +5770,9 @@ function renderFactory(ms){
 
   const cols = [
     ['id', '#', g => g.id, null],
-    ['effort', 'effort', g => g.effort.toFixed(2), 'fx.effort'],
+    fxGrid.sp.mode === 'completion'
+      ? ['completion', 'asked', g => pct(g.completion), 'fx.completion']
+      : ['effort', 'effort', g => g.effort.toFixed(2), 'fx.effort'],
     ['budget', 'budget $', g => g.budget.toFixed(2), 'fx.budget'],
     ['completionPct', 'completion', g => pct(g.sim.completionPct), 'fx.compl'],
     ['clearedPct', 'clear all', g => pct(g.sim.clearedPct), 'fx.clear'],
@@ -5713,8 +5784,9 @@ function renderFactory(ms){
   ];
   const rows = grid.slice().sort((a, b) => {
     const k = fxSort.key;
-    const va = k === 'id' || k === 'effort' || k === 'budget' ? a[k] : a.sim[k];
-    const vb = k === 'id' || k === 'effort' || k === 'budget' ? b[k] : b.sim[k];
+    const own = ['id','effort','budget','completion'];
+    const va = own.includes(k) ? a[k] : a.sim[k];
+    const vb = own.includes(k) ? b[k] : b.sim[k];
     return (va - vb) * fxSort.dir;
   });
 
@@ -5771,7 +5843,9 @@ function renderFactoryDetail(g){
   const {sp} = fxGrid;
   const m = mdl();
   $('#fxDetail').innerHTML = `<div class="panel">
-    <h3>Config #${g.id} — effort ${g.effort.toFixed(2)}, budget $${g.budget.toFixed(2)}</h3>
+    <h3>Config #${g.id} — ${fxGrid.sp.mode === 'completion'
+      ? `targets set for ${pct(g.completion)} completion` : `effort ${g.effort.toFixed(2)}`},
+      budget $${g.budget.toFixed(2)}</h3>
     <div class="cards-grid" style="margin-bottom:14px">${statCards([
       ['gold', 'Completion', pct(g.sim.completionPct), 'of served missions', 'fx.compl'],
       ['', 'Matches used', fmt(g.sim.avgMatches, 1), `of ${sp.dayPlan.reduce((a,d)=>a+d.matches,0)} available`, 'e.effort'],
