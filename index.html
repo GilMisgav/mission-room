@@ -3252,7 +3252,7 @@ function poissonSample(lambda, rng){
 // ── one player, one run ─────────────────────────────────────────────
 // days:   [{missions:[{type,target,tokens,bonusCash}]}]
 // rates:  {type: expected events per match}
-function simulatePlayer(days, rates, opts, rng, exposure, timing){
+function simulatePlayer(days, rates, opts, rng, exposure, timing, curve){
   const visible = Math.max(1, opts.visibleSlots);
   const claimRate = opts.claimRate ?? 1;
 
@@ -3262,7 +3262,7 @@ function simulatePlayer(days, rates, opts, rng, exposure, timing){
   days.forEach((day, dayIdx) => {
     const queue = day.missions.map((m, slot) => ({m, slot}));
     const active = queue.splice(0, visible).map(x => ({...x, got: 0, open: 0}));
-    let dayDone = 0, dayTokens = 0, lastCompleteMatch = 0;
+    let dayDone = 0, dayTokens = 0, lastCompleteMatch = 0, lastMatchPlayed = 0;
     served += day.missions.length;
 
     // each day carries its own match budget — a ramp is a normal thing to author
@@ -3270,6 +3270,8 @@ function simulatePlayer(days, rates, opts, rng, exposure, timing){
     for (let match = 1; match <= dayMatches; match++){
       if (!active.length) break;                 // whole chain cleared early
       matches++;
+      let gainedThisMatch = 0;
+      lastMatchPlayed = match;
       for (let i = active.length - 1; i >= 0; i--){
         const a = active[i];
         a.open++;
@@ -3282,11 +3284,34 @@ function simulatePlayer(days, rates, opts, rng, exposure, timing){
           dayDone++; completed++; lastCompleteMatch = match;
           if (rng() < claimRate){
             dayTokens += a.m.tokens;
+            gainedThisMatch += a.m.tokens;
             missionCash += a.m.bonusCash || 0;
           }
           active.splice(i, 1);
           if (queue.length) active.push({...queue.shift(), got: 0, open: 0});   // uncover the next
         }
+      }
+      // running state after this match: how much of the day is done, and what the
+      // bar holds. This is the accumulation curve — the thing a per-mission average
+      // cannot show, because missions land at different points in the day.
+      if (curve && curve[dayIdx] && curve[dayIdx][match - 1]){
+        const c = curve[dayIdx][match - 1];
+        c.done += dayDone;
+        c.tokens += dayTokens;
+        if (dayDone === day.missions.length) c.cleared++;
+        void gainedThisMatch;
+      }
+    }
+    // A player who clears the chain breaks out of the match loop, so without this
+    // they stop contributing to the later matches and the "cumulative" average
+    // falls instead of flattening. Carry their final state forward to the end of
+    // the day.
+    if (curve && curve[dayIdx]){
+      for (let mi = lastMatchPlayed; mi < curve[dayIdx].length; mi++){
+        const c = curve[dayIdx][mi];
+        c.done += dayDone;
+        c.tokens += dayTokens;
+        if (dayDone === day.missions.length) c.cleared++;
       }
     }
     bar += dayTokens;
@@ -3324,13 +3349,15 @@ function simulateConfig(cfg, rates, opts){
     row.cleared = 0; row.clearAt = 0;
     return row;
   });
+  const curve = cfg.days.map(d => Array.from({length: d.matches},
+    () => ({done: 0, tokens: 0, cleared: 0})));
   const tiers = cfg.tiers;
   const acc = {bar: 0, missionCash: 0, chestCash: 0, completed: 0, served: 0, matches: 0,
     chests: 0, grand: 0, cleared: 0};
   const bars = [], tierHits = new Array(tiers.length).fill(0);
 
   for (let p = 0; p < players; p++){
-    const r = simulatePlayer(cfg.days, rates, opts, rng, null, timing);
+    const r = simulatePlayer(cfg.days, rates, opts, rng, null, timing, curve);
     acc.bar += r.bar; acc.missionCash += r.missionCash;
     acc.completed += r.completed; acc.served += r.served; acc.matches += r.matches;
     bars.push(r.bar);
@@ -3363,6 +3390,14 @@ function simulateConfig(cfg, rates, opts){
     costMission: acc.missionCash / n,
     costChest: acc.chestCash / n,
     costTotal: (acc.missionCash + acc.chestCash) / n,
+    // cumulative state after each match of each day, averaged over players
+    curve: curve.map((row, di) => row.map((c, mi) => ({
+      match: mi + 1,
+      done: c.done / n,
+      donePct: cfg.days[di].missions.length ? (c.done / n) / cfg.days[di].missions.length : 0,
+      tokens: c.tokens / n,
+      clearedPct: c.cleared / n,
+    }))),
     // matches actually needed: per slot, and for the day as a whole
     timing: timing.map((row, di) => ({
       slots: row.map(x => ({rate: x.done / n, atMatch: x.done ? x.at / x.done : null})),
@@ -3638,6 +3673,10 @@ const TIP = {
   'fx.dayBudget': '<span class="h">bonus cash $</span>Money this day hands out — split across its missions, and into its chest if it has one. This is the designed figure; what it actually pays depends on completion and is in the cost column.',
   'fx.dayChest': '<span class="h">chest</span>Whether a chest lands at the end of this day, set at the tokens the run is expected to have reached by then. Between 2 and 5 chests total (rule 11).',
   'fx.budgetmul': '<span class="h">Budget ×</span>Multiplier over the whole per-day money schedule. 0.5× halves every day, 2× doubles it — the shape you authored is kept, only the scale varies across the grid.',
+  'fx.curve': '<span class="h">How it accumulates</span>The running state after each match of the day, averaged over the simulated players: how many missions are done and how many tokens sit on the bar. A per-mission average cannot show this, because missions land at different points — this is where you see whether the day builds steadily or stalls halfway.',
+  'fx.curveDone': '<span class="h">missions done</span>Average number of the day\'s missions completed by that match.',
+  'fx.curveTok': '<span class="h">tokens on the bar</span>Average claimed tokens by that match. This is what drives the chest thresholds.',
+  'fx.curveClear': '<span class="h">day cleared</span>Share of players who have finished every mission of the day by that match.',
   'fx.variety': '<span class="h">Variety</span>With variety off, every config in the grid draws the same missions in the same order and only the targets move — 24 near-identical candidates. On, each config gets its own seeded composition: which types it picks, how they are ordered, and how the token weights fall. The two grid axes stay the controlled comparison; this makes the configs genuinely different things to choose between.',
   'fx.mix': '<span class="h">mix</span>How many missions across the whole run fall in each difficulty tier — <b>E</b>asy, <b>M</b>edium (challenging-easy), <b>H</b>ard (challenging). The quickest way to see that two configs are actually different chains.',
   'fx.arc': '<span class="h">order</span>How each day is ordered. <b>easy-first</b> puts the most reachable missions in the open slots. <b>gentle-ramp</b> keeps the open slots reachable then reverses the covered tail, so the day finishes on its hardest. <b>alternating</b> weaves easy and hard. Slot 1 is always the most reachable, whatever the arc — otherwise the chain stalls behind a mission nobody finishes.',
@@ -6004,7 +6043,43 @@ function renderFactoryDetail(g){
               : ok ? `clears with ${fmt(d.matches - t.clearAtMatch, 1)} matches to spare`
                    : 'needs more matches than the day allows'}</td></tr>`;
         })()}
-      </tbody></table></div></div>`).join('')}
+      </tbody></table></div>
+      ${(() => {
+        const cv = (g.sim.curve || [])[i];
+        if (!cv || !cv.length) return '';
+        const maxTok = Math.max(...cv.map(c => c.tokens), 1);
+        const nM = d.missions.length;
+        // checkpoints at quarters of the day, so the shape reads without 25 rows
+        const marks = [0.25, 0.5, 0.75, 1].map(f => cv[Math.min(cv.length - 1, Math.ceil(f * cv.length) - 1)]);
+        return `<div style="margin-top:12px">
+          <h3 style="margin:0 0 6px"${tip('fx.curve')}>How it accumulates over the ${d.matches} matches</h3>
+          <div class="spark" style="height:46px">${cv.map(c =>
+            `<i style="height:${100 * c.donePct}%" title="match ${c.match}: ${fmt(c.done, 2)} of ${nM} missions, ${fmt(c.tokens, 1)} tokens"></i>`).join('')}</div>
+          <div class="bar-x">${cv.map(c => `<span>${c.match % 5 === 0 || c.match === 1 ? c.match : ''}</span>`).join('')}</div>
+          <div class="tscroll" style="margin-top:8px"><table><thead><tr>
+            <th>after match</th><th${tip('fx.curveDone')}>missions done</th>
+            <th>% of the day</th><th${tip('fx.curveTok')}>tokens on the bar</th>
+            <th${tip('fx.curveClear')}>day cleared</th></tr></thead><tbody>
+            ${marks.map(c => `<tr><td>${c.match}<span class="muted" style="font-size:10px">/${d.matches}</span></td>
+              <td>${fmt(c.done, 2)}<span class="muted" style="font-size:10px">/${nM}</span></td>
+              <td style="color:${c.donePct > .8 ? 'var(--win)' : c.donePct > .5 ? 'var(--warn)' : 'var(--muted)'}">${pct(c.donePct)}</td>
+              <td style="color:var(--gold)">${fmt(c.tokens, 1)}</td>
+              <td class="muted">${pct(c.clearedPct)}</td></tr>`).join('')}
+          </tbody></table></div>
+          <p class="hint">${(() => {
+            const half = cv.find(c => c.donePct >= 0.5);
+            const last = cv[cv.length - 1];
+            const plateau = cv.findIndex((c, k) => k > 2 && c.done - cv[k - 1].done < 0.01 && c.donePct > 0.3);
+            return `Half the day's missions land by match ${half ? half.match : '—'}.` +
+              (plateau > 0 && plateau < cv.length - 2
+                ? ` Progress flattens after match ${plateau + 1} — the remaining ${fmt(nM - last.done, 1)}
+                    mission${nM - last.done > 1.5 ? 's are' : ' is'} out of reach, so the matches after it
+                    earn nothing.`
+                : ` It keeps climbing to the last match.`);
+          })()}</p>
+        </div>`;
+      })()}
+      </div>`).join('')}
     <h3 style="margin-top:14px">Chests</h3>
     <div class="chests">${g.cfg.tiers.map((t, i) => `<div class="chest ${g.sim.tierReach[i] > 0.5 ? 'hit' : ''}">
       <div class="t">chest ${i + 1}</div><div class="n">$${fmt(t.bonusCash, 2)}</div>
