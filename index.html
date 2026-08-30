@@ -507,6 +507,8 @@
       <div class="narrow"><label class="f" data-tip="fx.visible" tabindex="0">Visible slots</label><input type="number" id="fxVis" value="3" min="1" max="10"></div>
       <div class="narrow"><label class="f" data-tip="cmp.comfort" tabindex="0">Comfort %</label><input type="number" id="fxComfort" value="70" min="0" max="100"></div>
       <div class="narrow"><label class="f" data-tip="bar.claim" tabindex="0">Claim %</label><input type="number" id="fxClaim" value="85" min="0" max="100"></div>
+      <div class="narrow"><label class="f" data-tip="fx.targetMin" tabindex="0">Target min</label><input type="number" id="fxTgtMin" value="1" min="1" max="99"></div>
+      <div class="narrow"><label class="f" data-tip="fx.targetMax" tabindex="0">Target max</label><input type="number" id="fxTgtMax" value="20" min="1" max="200"></div>
     </div>
     <h3 style="margin-top:16px" data-tip="fx.types" tabindex="0">Which missions it may use</h3>
     <div class="btnrow" style="margin:0 0 10px">
@@ -3228,16 +3230,16 @@ function poissonSample(lambda, rng){
 // ── one player, one run ─────────────────────────────────────────────
 // days:   [{missions:[{type,target,tokens,bonusCash}]}]
 // rates:  {type: expected events per match}
-function simulatePlayer(days, rates, opts, rng){
+function simulatePlayer(days, rates, opts, rng, exposure){
   const visible = Math.max(1, opts.visibleSlots);
   const claimRate = opts.claimRate ?? 1;
 
   let bar = 0, missionCash = 0, completed = 0, served = 0, matches = 0;
   const perDay = [];
 
-  for (const day of days){
-    const queue = day.missions.slice();
-    const active = queue.splice(0, visible).map(m => ({m, got: 0}));
+  days.forEach((day, dayIdx) => {
+    const queue = day.missions.map((m, slot) => ({m, slot}));
+    const active = queue.splice(0, visible).map(x => ({...x, got: 0, open: 0}));
     let dayDone = 0, dayTokens = 0;
     served += day.missions.length;
 
@@ -3248,6 +3250,8 @@ function simulatePlayer(days, rates, opts, rng){
       matches++;
       for (let i = active.length - 1; i >= 0; i--){
         const a = active[i];
+        a.open++;
+        if (exposure) exposure[dayIdx][a.slot] += 1;
         a.got += poissonSample(rates[a.m.type] || 0, rng);
         if (a.got >= a.m.target){
           // completing it is not the same as claiming it — tokens reach the bar
@@ -3258,14 +3262,26 @@ function simulatePlayer(days, rates, opts, rng){
             missionCash += a.m.bonusCash || 0;
           }
           active.splice(i, 1);
-          if (queue.length) active.push({m: queue.shift(), got: 0});   // uncover the next
+          if (queue.length) active.push({...queue.shift(), got: 0, open: 0});   // uncover the next
         }
       }
     }
     bar += dayTokens;
     perDay.push({done: dayDone, tokens: dayTokens, bar});
-  }
+  });
   return {bar, missionCash, completed, served, matches, perDay};
+}
+
+// ── slot exposure ───────────────────────────────────────────────────
+// How many matches each slot is actually OPEN for. Slots past visibleSlots start
+// covered and only uncover when an earlier mission completes, so sizing their
+// targets against the whole day's matches asks for something they never had time
+// to earn. One calibration pass measures the real window.
+function measureExposure(days, rates, opts, players, seed){
+  const rng = E.mulberry32(seed || 99);
+  const exposure = days.map(d => new Array(d.missions.length).fill(0));
+  for (let p = 0; p < players; p++) simulatePlayer(days, rates, opts, rng, exposure);
+  return exposure.map(row => row.map(v => v / players));
 }
 
 // ── one config, many players ────────────────────────────────────────
@@ -3361,16 +3377,31 @@ function buildConfig(spec, rates, tierOf){
     dayList.push({matches: dayMatches, budget: plan[d].budget * budgetMul, chest: !!plan[d].chest,
       missions: clean.map((t, i) => {
         const expected = (rates[t] || 0) * dayMatches;
-        const target = Math.max(1, Math.round(expected * effort));
-        return {index: i + 1, type: t, target, tokens: TOKENS[tierOf(t)] || 8, bonusCash: 0};
+        return {index: i + 1, type: t, target: clampTarget(expected * effort, spec),
+          tokens: TOKENS[tierOf(t)] || 8, bonusCash: 0};
       })});
+  }
+
+  // Second pass: re-size every target against the matches its slot is really open
+  // for. Without this the locked slots carry targets sized for a window they never
+  // get, which is what drags completion down long before the effort dial explains it.
+  if (spec.calibrate !== false && spec.visibleSlots < cap){
+    const exp = measureExposure(dayList, rates,
+      {visibleSlots: spec.visibleSlots, claimRate: 1}, 120, 4242);
+    dayList.forEach((d, di) => d.missions.forEach((m, si) => {
+      const open = Math.max(1, exp[di][si]);
+      m.openMatches = +open.toFixed(1);
+      m.target = clampTarget((rates[m.type] || 0) * open * effort, spec);
+    }));
+  } else {
+    dayList.forEach(d => d.missions.forEach(m => { m.openMatches = d.matches; }));
   }
 
   // Each day's money is spent on that day. If the day carries a chest, part of it
   // is held back for that chest so the day pays on completion AND on the bar
   // reaching its mark; if it does not, the whole day's budget goes on its missions.
   const expByDay = dayList.map(d => d.missions.reduce((a, m) => {
-    const lambda = (rates[m.type] || 0) * d.matches;
+    const lambda = (rates[m.type] || 0) * (m.openMatches || d.matches);
     return a + m.tokens * (lambda > 0 ? poissonTail(m.target, lambda) : 0);
   }, 0));
 
@@ -3396,6 +3427,15 @@ function buildConfig(spec, rates, tierOf){
   const expTokens = expByDay.reduce((a, b) => a + b, 0);
   return {days: dayList, tiers, dailyCap: cap, expTokens: +expTokens.toFixed(1),
     expByDay: expByDay.map(v => +v.toFixed(1)), spec};
+}
+
+// Targets are whole numbers with a floor and a ceiling. Without a ceiling a
+// 4.6-per-match type on a 20-match day asks for 120 of something, which reads as
+// broken even when the arithmetic is right.
+function clampTarget(raw, spec){
+  const lo = Math.max(1, spec.targetMin || 1);
+  const hi = Math.max(lo, spec.targetMax || 9999);
+  return Math.min(hi, Math.max(lo, Math.round(raw)));
 }
 
 // Poisson tail P(X >= k), shared with the app's closed-form estimator
@@ -3430,7 +3470,8 @@ function generateGrid(base, rates, tierOf, opts){
   return out;
 }
 
-const API = {poissonSample, simulatePlayer, simulateConfig, buildConfig, generateGrid, poissonTail};
+const API = {poissonSample, simulatePlayer, simulateConfig, buildConfig, generateGrid,
+  poissonTail, measureExposure, clampTarget};
 if (typeof module !== 'undefined' && module.exports) module.exports = API;
 else root.MissionFactory = API;
 
@@ -3485,6 +3526,9 @@ const TIP = {
   'fx.dayBudget': '<span class="h">bonus cash $</span>Money this day hands out — split across its missions, and into its chest if it has one. This is the designed figure; what it actually pays depends on completion and is in the cost column.',
   'fx.dayChest': '<span class="h">chest</span>Whether a chest lands at the end of this day, set at the tokens the run is expected to have reached by then. Between 2 and 5 chests total (rule 11).',
   'fx.budgetmul': '<span class="h">Budget ×</span>Multiplier over the whole per-day money schedule. 0.5× halves every day, 2× doubles it — the shape you authored is kept, only the scale varies across the grid.',
+  'fx.targetMin': '<span class="h">Target min</span>Floor on every generated target. 1 is the natural floor — a target of 0 is not a mission.',
+  'fx.targetMax': '<span class="h">Target max</span>Ceiling on every generated target. Without one, a type that fires 4.6 times a match asks for 120 of something on a 20-match day — arithmetically right, unreadable as a mission.',
+  'fx.open': '<span class="h">open for</span>Matches this slot is actually open, measured by a calibration pass. Slots past the visible count start covered, so they get a fraction of the day — and their targets are sized against that fraction, not the whole day.',
   'fx.count': '<span class="h">Configs</span>How many candidates to generate. They are laid out on a grid: effort varies across, budget varies down.',
   'fx.visible': '<span class="h">Visible slots</span>How many missions are open at once. The rest sit locked and covered, and one uncovers each time an open mission completes — so the tail of a chain only starts accruing after earlier missions finish. This is simulated properly, not approximated: a mission nobody completes blocks the slot behind it.',
   'fx.effort': '<span class="h">Effort</span>Targets as a share of what the matches/day budget is expected to yield. <b>0.4</b> most players clear; <b>1.0</b> is a coin flip by construction; <b>1.3</b> most will not finish.',
@@ -5554,6 +5598,8 @@ function fxSpec(){
       budget: Math.max(0, +d.budget || 0), chest: !!d.chest})),
     comfort: (+$('#fxComfort').value || 70) / 100,
     claimRate: (+$('#fxClaim').value || 85) / 100,
+    targetMin: Math.max(1, +$('#fxTgtMin').value || 1),
+    targetMax: Math.max(1, +$('#fxTgtMax').value || 20),
     players: Math.max(50, +$('#fxPlayers').value || 400),
     effortMin: +$('#fxEffMin').value || 0.4, effortMax: +$('#fxEffMax').value || 1.3,
     budgetMin: +$('#fxBudMin').value || 0.5, budgetMax: +$('#fxBudMax').value || 4,
@@ -5570,10 +5616,12 @@ function renderFactoryHint(){
     drawn from <b>${fxTypes ? fxTypes.size : 0}</b> selected of ${playable} playable types, measured on <b>${esc((S.stats || {}).label || 'the deck pool')}</b>.
     ${sp.visibleSlots < sp.dailyCap
       ? `<b>Only ${sp.visibleSlots} of ${sp.dailyCap} missions are open at once</b> — the rest uncover as
-         earlier ones complete, so the tail may never be reached.`
-      : 'Every mission is open from the start.'}`;
+         earlier ones complete. Targets for the covered slots are sized against the matches they are
+         actually open for, measured by a calibration pass — not the whole day, which they never get.`
+      : 'Every mission is open from the start.'}
+      Targets clamped to ${sp.targetMin}–${sp.targetMax}.`;
 }
-['#fxN','#fxCap','#fxVis','#fxComfort','#fxClaim',
+['#fxN','#fxCap','#fxVis','#fxComfort','#fxClaim','#fxTgtMin','#fxTgtMax',
  '#fxEffMin','#fxEffMax','#fxBudMin','#fxBudMax','#fxPlayers']
   .forEach(x => $(x).addEventListener('input', renderFactoryHint));
 
@@ -5599,7 +5647,8 @@ $('#fxGo').addEventListener('click', () => {
   setTimeout(() => {
     const t0 = Date.now();
     const base = {dailyCap: sp.dailyCap, visibleSlots: sp.visibleSlots,
-      dayPlan: sp.dayPlan, comfort: sp.comfort, pool};
+      dayPlan: sp.dayPlan, comfort: sp.comfort, pool,
+      targetMin: sp.targetMin, targetMax: sp.targetMax};
     const grid = F.generateGrid(base, rates, tierOf, sp);
     grid.forEach(g => {
       g.sim = F.simulateConfig(g.cfg, rates, {players: sp.players,
@@ -5683,8 +5732,8 @@ function renderFactory(ms){
       days: g.cfg.days.map((d, i) => ({day: i + 1, matches: d.matches,
         bonus_cash_budget: +d.budget.toFixed(2), chest_at_end: d.chest,
         missions: d.missions.map(m =>
-        ({index: m.index, type: m.type, target: m.target, mission_token: m.tokens,
-          bonusCash: m.bonusCash || undefined}))})),
+        ({index: m.index, type: m.type, target: m.target, open_for_matches: m.openMatches,
+          mission_token: m.tokens, bonusCash: m.bonusCash || undefined}))})),
       progression: {numberOfDays: sp.days, tiers: g.cfg.tiers.map(t =>
         ({tierUid: t.tierUid, tokensRequired: t.tokensRequired, reward: {bonusCash: t.bonusCash}}))},
     })),
@@ -5708,13 +5757,16 @@ function renderFactoryDetail(g){
         ${d.missions.reduce((a, x) => a + x.tokens, 0)} tokens</span></div>
       <div class="tscroll"><table><thead><tr>
         <th>slot</th><th${tip('m.type')}>type</th><th${tip('m.tier')}>tier</th>
-        <th${tip('m.per_deck')}>per match</th><th${tip('b.mtarget')}>target</th>
+        <th${tip('m.per_deck')}>per match</th><th${tip('fx.open')}>open for</th>
+        <th${tip('b.mtarget')}>target</th>
         <th${tip('b.mtokens')}>tokens</th><th${tip('b.mbonus')}>bonus $</th>
         <th class="txt">opens</th></tr></thead><tbody>
         ${d.missions.map((x, j) => `<tr>
           <td>${x.index}</td><td class="mono">${x.type}</td>
           <td><span class="pill tier-${m.types[x.type].tier}">${TIERLABEL[m.types[x.type].tier]}</span></td>
           <td class="muted">${fmt(m.types[x.type].per_deck, 3)}</td>
+          <td class="muted">${x.openMatches != null ? fmt(x.openMatches, 1) : '—'}<span
+            class="muted" style="font-size:10px">/${d.matches}</span></td>
           <td style="color:var(--gold)">${x.target}</td>
           <td class="muted">${x.tokens}</td><td class="muted">${x.bonusCash ? '$' + fmt(x.bonusCash, 2) : '—'}</td>
           <td class="txt">${j < sp.visibleSlots ? 'open from the start'
