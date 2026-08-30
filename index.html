@@ -3453,11 +3453,23 @@ function buildConfig(spec, rates, tierOf){
   // matches of exposure, so the mission reads as impossible however the targets
   // are solved. Filter by achievability first, then pick by difficulty.
   const minTarget = Math.max(1, spec.targetMin || 1);
-  const floor = spec.mode === 'completion'
+  // Never let the ask drag the bar below an absolute floor: even at a 30% request,
+  // a mission whose smallest legal target still needs multiples of the day's play
+  // is bad design, not a hard mission.
+  const floor = Math.max(0.35, spec.mode === 'completion'
     ? Math.min(spec.completion ?? 0.8, 0.6)
-    : 0.35;
-  const canDo = (t, dayMatches) =>
-    poissonTail(minTarget, (rates[t] || 0) * dayMatches) >= floor;
+    : 0.35);
+  // Two independent gates. The probability one asks "will enough players finish it";
+  // the ratio one asks "can the day physically deliver it" — the mean wait for a rare
+  // event runs far past its completion odds, and that is the number that reads as
+  // broken when a 10-match day shows a mission needing 29.
+  const MAXRATIO = spec.maxMatchRatio || 1.6;
+  const canDo = (t, dayMatches) => {
+    const rate = rates[t] || 0;
+    if (!(rate > 0)) return false;
+    if (poissonTail(minTarget, rate * dayMatches) < floor) return false;
+    return (minTarget / rate) <= dayMatches * MAXRATIO;
+  };
   const excluded = [];
 
   const dayList = [];
@@ -3524,6 +3536,14 @@ function buildConfig(spec, rates, tierOf){
   // Set every target for a given completion ask (or effort), re-measuring slot
   // exposure as it goes — the two depend on each other, since easier targets free
   // a slot sooner and lengthen the window for whatever is queued behind it.
+  // A target must be earnable inside the day it belongs to. The completion maths on
+  // its own will happily pick a target needing three times the day's matches when
+  // that lands nearer the requested percentage — arithmetically closer, and unusable
+  // as a mission. Cap every target at what STRETCH times the day's play can deliver.
+  const STRETCH = spec.targetStretch || 1.25;
+  const dayCeiling = (type, dayMatches) =>
+    Math.max(1, Math.floor((rates[type] || 0) * dayMatches * STRETCH));
+
   const applyTargets = (pEff) => {
     if (spec.calibrate !== false && spec.visibleSlots < cap){
       for (let pass = 0; pass < 2; pass++){
@@ -3533,18 +3553,20 @@ function buildConfig(spec, rates, tierOf){
           const open = Math.max(1, exp[di][si]);
           m.openMatches = +open.toFixed(1);
           const lambda = (rates[m.type] || 0) * open;
+          const ceiling = dayCeiling(m.type, d.matches);
           m.target = spec.mode === 'completion'
-            ? solveTargetForCompletion(lambda, pEff, spec)
-            : clampTarget(lambda * effort, spec);
+            ? solveTargetForCompletion(lambda, pEff, spec, ceiling)
+            : Math.min(ceiling, clampTarget(lambda * effort, spec));
         }));
       }
     } else {
       dayList.forEach(d => d.missions.forEach(m => {
         m.openMatches = d.matches;
         const lambda = (rates[m.type] || 0) * d.matches;
+        const ceiling = dayCeiling(m.type, d.matches);
         m.target = spec.mode === 'completion'
-          ? solveTargetForCompletion(lambda, pEff, spec)
-          : clampTarget(lambda * effort, spec);
+          ? solveTargetForCompletion(lambda, pEff, spec, ceiling)
+          : Math.min(ceiling, clampTarget(lambda * effort, spec));
       }));
     }
   };
@@ -3555,7 +3577,7 @@ function buildConfig(spec, rates, tierOf){
   // mission finishing early hands the rest of the day to the ones behind it. So
   // close the loop on the number that is actually claimed: bisect the effective ask
   // until the SIMULATED completion matches what was requested.
-  let calibratedAsk = spec.completion;
+  let calibratedAsk = spec.completion, askUnreachable = null;
   if (spec.mode === 'completion' && spec.calibrateOutcome !== false){
     const ask = spec.completion;
     const measure = () => simulateConfig({days: dayList, tiers: []}, rates,
@@ -3585,6 +3607,11 @@ function buildConfig(spec, rates, tierOf){
       }
     }
     calibratedAsk = pEff;
+    // If the day-budget cap stops targets getting any harder, the requested
+    // difficulty is simply not reachable with these types on this schedule. Say so
+    // rather than reporting a number the config does not hit.
+    const finalProbe = measure();
+    askUnreachable = finalProbe - ask > 0.13 ? +(finalProbe).toFixed(3) : null;
   }
 
   // Each day's money is spent on that day. If the day carries a chest, part of it
@@ -3642,7 +3669,7 @@ function buildConfig(spec, rates, tierOf){
   }
 
   const expTokens = expByDay.reduce((a, b) => a + b, 0);
-  return {days: dayList, tiers, dailyCap: cap, arc, excluded, calibratedAsk, comfortUsed: cap ? nComfort / cap : 0,
+  return {days: dayList, tiers, dailyCap: cap, arc, excluded, calibratedAsk, askUnreachable, comfortUsed: cap ? nComfort / cap : 0,
     expTokens: +expTokens.toFixed(1),
     expByDay: expByDay.map(v => +v.toFixed(1)), spec};
 }
@@ -3660,13 +3687,14 @@ function clampTarget(raw, spec){
 // count", which fixes completion as a side effect — effort 1.0 lands near 50% no
 // matter what, because the target IS the mean. This solves the other way round:
 // the largest target that still leaves at least `p` of players completing it.
-function solveTargetForCompletion(lambda, p, spec){
+function solveTargetForCompletion(lambda, p, spec, dayCeiling){
   if (!(lambda > 0)) return clampTarget(1, spec);
+  const ceiling = dayCeiling != null ? Math.max(1, dayCeiling) : Infinity;
   // Targets are integers, so no target hits p exactly. Taking the largest target
   // that still clears p biases every mission upward — asked 45% came out at 72%.
   // Pick the target whose completion sits CLOSEST to the ask instead.
   let best = 1, bestGap = Infinity;
-  for (let t = 1; t <= 400; t++){
+  for (let t = 1; t <= Math.min(400, ceiling); t++){
     const tail = poissonTail(t, lambda);
     const gap = Math.abs(tail - p);
     if (gap < bestGap){ bestGap = gap; best = t; }
@@ -6010,7 +6038,9 @@ function renderFactory(ms){
   const cols = [
     ['id', '#', g => g.id, null],
     fxGrid.sp.mode === 'completion'
-      ? ['completion', 'asked', g => pct(g.completion), 'fx.completion']
+      ? ['completion', 'asked', g => pct(g.completion) +
+          (g.cfg.askUnreachable ? ' <span style="color:var(--warn)" title="cannot be made this hard">!</span>' : ''),
+         'fx.completion']
       : ['effort', 'effort', g => g.effort.toFixed(2), 'fx.effort'],
     ['budget', 'budget $', g => g.budget.toFixed(2), 'fx.budget'],
     ['mix', 'mix', g => {
@@ -6190,6 +6220,13 @@ function renderFactoryDetail(g){
         </div>`;
       })()}
       </div>`).join('')}
+    ${g.cfg.askUnreachable ? `<div class="alert warn" style="margin-top:14px">
+      <h4>This config cannot be made as hard as ${pct(g.completion)}</h4>
+      <p>Targets are capped at what a day's matches can actually deliver, and that cap binds here — the
+        chain bottoms out around <b>${pct(g.cfg.askUnreachable)}</b> completion. To go harder, give the
+        days fewer matches, add tougher mission types to the selection, or raise <b>Missions / day</b> so
+        there is more to finish.</p>
+    </div>` : ''}
     ${(g.cfg.excluded && g.cfg.excluded.length) ? `<div class="alert warn" style="margin-top:14px">
       <h4>${g.cfg.excluded[0].types.length} mission type${g.cfg.excluded[0].types.length === 1 ? '' : 's'}
         were ruled out — the day's matches cannot deliver them</h4>
