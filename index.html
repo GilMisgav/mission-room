@@ -3569,6 +3569,61 @@ function buildConfig(spec, rates, tierOf){
   const dayCeiling = (type, dayMatches) =>
     Math.max(1, Math.floor((rates[type] || 0) * dayMatches * STRETCH));
 
+  // ── token pricing ──────────────────────────────────────────────────
+  // Tokens used to come from the mission's TIER alone, so on the same type a target
+  // of 19 paid exactly what a target of 2 paid — the reward said nothing about the
+  // work. Price on the work instead: a mission's cost in play is target / rate, the
+  // matches it is expected to take.
+  //
+  // The day keeps the token budget its tier mix implies, so chest thresholds and the
+  // bar stay calibrated against the same totals as before; only the SHARE each
+  // mission takes of that budget changes, in proportion to the effort it asks for.
+  const effortOf = m => m.target / Math.max(rates[m.type] || 1e-9, 1e-9);
+  let tokenRate = 1;
+  //
+  // The rate is set ACROSS the whole config, not per day. Sharing out a fixed daily
+  // purse makes the rate fall as days get longer — day 3 paying 0.4 tokens a match
+  // for work that paid 1.0 on day 1 — which is the same unfairness in a new place.
+  // One rate for every mission on every day means equal work always pays equally.
+  const priceTokens = () => {
+    let purse = 0, work = 0;
+    dayList.forEach(d => d.missions.forEach(m => {
+      purse += (TOKENS[tierOf(m.type)] || 8) * (tokenScale[tierOf(m.type)] || 1);
+      work  += effortOf(m);
+    }));
+    let perMatch = work > 0 ? purse / work : 1;
+    // Integers need enough resolution to express the ratio. At a low rate the
+    // cheapest mission rounds to a floor of 1 token and reads as 2.0 tokens a match
+    // while everything else pays 0.5 — the clamp, not the design, setting the rate.
+    // Scale the whole config up until the smallest mission clears MIN_TOKENS, so the
+    // floor never binds. Tokens are a made-up currency and the bar is sized from
+    // whatever they add up to, so the scale itself carries no meaning; the ratios do.
+    const MIN_TOKENS = 3;
+    let minWork = Infinity;
+    dayList.forEach(d => d.missions.forEach(m => { minWork = Math.min(minWork, effortOf(m)); }));
+    if (minWork > 0 && minWork < Infinity) perMatch = Math.max(perMatch, MIN_TOKENS / minWork);
+    // Largest-remainder apportionment, not independent rounding. Rounding each
+    // mission on its own puts up to half a token of error on every line, which on a
+    // 2-token mission is 25% — the rate looks ragged for no reason other than
+    // arithmetic. Handing the leftovers to the largest remainders keeps the config's
+    // token total exact and the per-match rate as flat as integers allow.
+    const all = [];
+    dayList.forEach(d => d.missions.forEach(m => {
+      const w = effortOf(m);
+      m.matchesNeeded = +w.toFixed(1);
+      const exact = perMatch * w;
+      m.tokens = Math.max(1, Math.floor(exact));
+      all.push({m, rem: exact - Math.floor(exact)});
+    }));
+    let short = Math.round(perMatch * work) - all.reduce((a2, x) => a2 + x.m.tokens, 0);
+    all.sort((x, y) => y.rem - x.rem);
+    for (let i = 0; i < all.length && short > 0; i++, short--) all[i].m.tokens++;
+    dayList.forEach(d => d.missions.forEach(m => {
+      m.tokensPerMatch = +(m.tokens / Math.max(effortOf(m), 0.1)).toFixed(2);
+    }));
+    tokenRate = +perMatch.toFixed(2);
+  };
+
   const applyTargets = (pEff) => {
     if (spec.calibrate !== false && spec.visibleSlots < cap){
       for (let pass = 0; pass < 2; pass++){
@@ -3594,6 +3649,7 @@ function buildConfig(spec, rates, tierOf){
           : Math.min(ceiling, clampTarget(lambda * effort, spec));
       }));
     }
+    priceTokens();          // targets have settled — reprice against the final work
   };
   applyTargets(spec.completion);
 
@@ -3698,7 +3754,7 @@ function buildConfig(spec, rates, tierOf){
   }
 
   const expTokens = expByDay.reduce((a, b) => a + b, 0);
-  return {days: dayList, tiers, dailyCap: cap, arc, excluded, infeasible, calibratedAsk, askUnreachable, comfortUsed: cap ? nComfort / cap : 0,
+  return {days: dayList, tiers, dailyCap: cap, arc, excluded, infeasible, tokenRate, calibratedAsk, askUnreachable, comfortUsed: cap ? nComfort / cap : 0,
     expTokens: +expTokens.toFixed(1),
     expByDay: expByDay.map(v => +v.toFixed(1)), spec};
 }
@@ -3836,6 +3892,7 @@ const TIP = {
   'fx.targetMin': '<span class="h">Target min</span>Floor on every generated target. 1 is the natural floor — a target of 0 is not a mission.',
   'fx.targetMax': '<span class="h">Target max</span>Ceiling on every generated target. Without one, a type that fires 4.6 times a match asks for 120 of something on a 20-match day — arithmetically right, unreadable as a mission.',
   'fx.open': '<span class="h">open for</span>Matches this slot is actually open, measured by a calibration pass. Slots past the visible count start covered, so they get a fraction of the day — and their targets are sized against that fraction, not the whole day.',
+  'fx.tokrate': '<span class="h">tokens per match</span>this mission\'s tokens ÷ the matches it is expected to take. The factory prices every mission on the work it asks for, so this figure is deliberately near-flat down the whole column and across every day — equal effort pays equally. Small differences are integer rounding, nothing more.',
   'fx.solo': '<span class="h">matches needed</span>target ÷ the type\'s rate — how many matches of exposure this mission needs on its own, ignoring the queue. Compare it to <b>open for</b>: if it needs more matches than its slot is open, it cannot finish.',
   'fx.solototal': '<span class="h">whole day, summed</span>The per-mission needs added up. Missions run in parallel while open, so this is an upper bound, not the day\'s real cost — the simulated <b>by match</b> figure beside it is.',
   'fx.completes': '<span class="h">completes</span>Share of simulated players who finish this mission inside the day.',
@@ -3935,7 +3992,7 @@ const TIP = {
   'b.chainUid': '<span class="h">chainUid</span>The content address of the experience: first 8 hex of sha1 over the chain\'s ordered mission types. Retuning a target or reward never changes it; swapping a type or reordering does. That is what makes a silent content edit impossible.',
   'b.mtype': '<span class="h">type</span>One of the 29 bank types. Types must be unique within a chain, which is what makes composition-id + type collision-free.',
   'b.mtarget': '<span class="h">target</span>How many occurrences complete the mission. Must be an integer above 0.',
-  'b.mtokens': '<span class="h">mission_token</span>Required on every mission, and must be above 0. Tokens reach the long-chase bar only when the player <i>claims</i>.',
+  'b.mtokens': '<span class="h">mission_token</span>Required on every mission, and must be above 0. Tokens reach the long-chase bar only when the player <i>claims</i>. In the Factory these are priced on effort — target ÷ rate — at one flat rate for the whole config, so a target of 19 pays roughly ten times a target of 2 on the same type.',
   'b.mbonus': '<span class="h">bonusCash</span>Optional, on top of tokens, and the only real currency Missions pays. Leave blank for a token-only mission — those are what silently drop off the claim list at chase end.',
   'b.mresults': '<span class="h">isResultsBased</span>Whether the mission credits on match results rather than at match end. An authored per-mission flag, default false — the PRD\'s own example sets it false on <code>dealer_bust</code> and true on <code>win_after_double</code>.',
   'b.tierTokens': '<span class="h">chest tokens</span><code>tokensRequired</code> — the cumulative claimed-token threshold that unlocks this chest. Must be strictly increasing across tiers (rule 7).',
@@ -6155,7 +6212,8 @@ function renderFactoryDetail(g){
   const m = mdl();
   $('#fxDetail').innerHTML = `<div class="panel">
     <h3>Config #${g.id} — ${fxGrid.sp.mode === 'completion'
-      ? `targets set for ${pct(g.completion)} completion` : `effort ${g.effort.toFixed(2)}`},
+      ? `targets set for ${pct(g.completion)} completion` : `effort ${g.effort.toFixed(2)}`}${
+      g.cfg.tokenRate ? ` · <b>${fmt(g.cfg.tokenRate, 2)} tokens per match</b> of expected work, flat across every mission` : ''},
       budget $${g.budget.toFixed(2)}</h3>
     <div class="cards-grid" style="margin-bottom:14px">${statCards([
       ['gold', 'Completion', pct(g.sim.completionPct), 'of served missions', 'fx.compl'],
@@ -6173,7 +6231,8 @@ function renderFactoryDetail(g){
         <th${tip('fx.solo')}>matches needed</th>
         <th${tip('fx.completes')}>completes</th>
         <th${tip('fx.atmatch')}>by match</th>
-        <th${tip('b.mtokens')}>tokens</th><th${tip('b.mbonus')}>bonus $</th>
+        <th${tip('b.mtokens')}>tokens</th><th${tip('fx.tokrate')}>tok / match</th>
+        <th${tip('b.mbonus')}>bonus $</th>
         <th class="txt">opens</th></tr></thead><tbody>
         ${d.missions.map((x, j) => `<tr>
           <td>${x.index}</td><td class="mono">${x.type}</td>
@@ -6191,7 +6250,9 @@ function renderFactoryDetail(g){
             return `<td style="color:${col}">${pct(sl.rate)}</td>
               <td class="muted">${sl.atMatch ? fmt(sl.atMatch, 1) : 'never'}</td>`;
           })()}
-          <td class="muted">${x.tokens}</td><td class="muted">${x.bonusCash ? '$' + fmt(x.bonusCash, 2) : '—'}</td>
+          <td class="muted">${x.tokens}</td>
+          <td class="mono" style="color:var(--dim)">${x.tokensPerMatch != null ? fmt(x.tokensPerMatch, 2) : '—'}</td>
+          <td class="muted">${x.bonusCash ? '$' + fmt(x.bonusCash, 2) : '—'}</td>
           <td class="txt">${j < sp.visibleSlots ? 'open from the start'
             : `uncovers when ${j - sp.visibleSlots + 1} mission${j - sp.visibleSlots ? 's' : ''} above complete${j - sp.visibleSlots ? '' : 's'}`}</td>
         </tr>`).join('')}
