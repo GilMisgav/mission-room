@@ -3484,14 +3484,17 @@ function buildConfig(spec, rates, tierOf){
     if (poissonTail(minTarget, rate * dayMatches) < floor) return false;
     return (minTarget / rate) <= dayMatches * MAXRATIO;
   };
-  const excluded = [];
+  const excluded = [], infeasible = [];
 
   const dayList = [];
   for (let d = 0; d < days; d++){
     const dayMatches = plan[d].matches;
-    // drop what this day cannot deliver, but never let a bucket empty out
-    const keep = arr => { const ok = arr.filter(t => canDo(t, dayMatches));
-      return ok.length ? ok : arr; };
+    // Drop what this day cannot deliver. A bucket IS allowed to empty out: the
+    // previous "never return empty" guard handed back the unfiltered bucket, and
+    // pickStretch() draws hard-first, so on a short day — where every hard type
+    // fails the gate — it served exactly the types the gate had just rejected.
+    // An empty bucket now falls through to the next one, which is still vetted.
+    const keep = arr => arr.filter(t => canDo(t, dayMatches));
     const cut = pool.filter(t => !canDo(t, dayMatches));
     if (cut.length) excluded.push({day: d + 1, matches: dayMatches, types: cut,
       worst: cut.map(t => ({type: t, matchesNeeded: (rates[t] || 0) > 0
@@ -3500,7 +3503,15 @@ function buildConfig(spec, rates, tierOf){
     const used = new Set();
     // with variety, each config+day shuffles its buckets instead of walking them
     // in rate order, so different configs pick genuinely different missions
-    const kEasy = keep(easy), kMid = keep(mid), kHard = keep(hard), kPool = keep(pool);
+    const kEasy = keep(easy), kMid = keep(mid), kHard = keep(hard);
+    // Last resort only: if NOTHING clears the gate the day is impossible as
+    // specified, so offer the least-bad types and say so, rather than silently
+    // filling the day with missions nobody can finish.
+    let kPool = keep(pool);
+    if (!kPool.length){
+      kPool = pool.slice().sort((x, y) => (rates[y] || 0) - (rates[x] || 0)).slice(0, cap);
+      infeasible.push({day: d + 1, matches: dayMatches});
+    }
     const dEasy = vr ? shuffle(kEasy) : rot(kEasy, d);
     const dMid  = vr ? shuffle(kMid)  : rot(kMid, d);
     const dHard = vr ? shuffle(kHard) : rot(kHard, d);
@@ -3625,7 +3636,11 @@ function buildConfig(spec, rates, tierOf){
     // difficulty is simply not reachable with these types on this schedule. Say so
     // rather than reporting a number the config does not hit.
     const finalProbe = measure();
-    askUnreachable = finalProbe - ask > 0.13 ? +(finalProbe).toFixed(3) : null;
+    // Flag BOTH directions and at 5pp, not 13pp overshoot only. Long generous days
+    // bottom out well above a low ask (targets clamp at 1, so a 50-match day cannot
+    // be made hard), and that used to slip through under the old one-sided gate as
+    // a dial reading 60% on a chain that really completes 81%.
+    askUnreachable = Math.abs(finalProbe - ask) > 0.05 ? +(finalProbe).toFixed(3) : null;
   }
 
   // Each day's money is spent on that day. If the day carries a chest, part of it
@@ -3683,7 +3698,7 @@ function buildConfig(spec, rates, tierOf){
   }
 
   const expTokens = expByDay.reduce((a, b) => a + b, 0);
-  return {days: dayList, tiers, dailyCap: cap, arc, excluded, calibratedAsk, askUnreachable, comfortUsed: cap ? nComfort / cap : 0,
+  return {days: dayList, tiers, dailyCap: cap, arc, excluded, infeasible, calibratedAsk, askUnreachable, comfortUsed: cap ? nComfort / cap : 0,
     expTokens: +expTokens.toFixed(1),
     expByDay: expByDay.map(v => +v.toFixed(1)), spec};
 }
@@ -6234,12 +6249,24 @@ function renderFactoryDetail(g){
         </div>`;
       })()}
       </div>`).join('')}
-    ${g.cfg.askUnreachable ? `<div class="alert warn" style="margin-top:14px">
+    ${g.cfg.askUnreachable ? (g.cfg.askUnreachable > g.completion ? `<div class="alert warn" style="margin-top:14px">
       <h4>This config cannot be made as hard as ${pct(g.completion)}</h4>
       <p>Targets are capped at what a day's matches can actually deliver, and that cap binds here — the
         chain bottoms out around <b>${pct(g.cfg.askUnreachable)}</b> completion. To go harder, give the
         days fewer matches, add tougher mission types to the selection, or raise <b>Missions / day</b> so
         there is more to finish.</p>
+    </div>` : `<div class="alert warn" style="margin-top:14px">
+      <h4>This config cannot be made as easy as ${pct(g.completion)}</h4>
+      <p>Even at the smallest target the mission types allow, this schedule tops out around
+        <b>${pct(g.cfg.askUnreachable)}</b> completion — there are not enough matches in the day to
+        finish the chain more often. Give the days more matches, allow more frequent mission
+        types, or lower <b>Missions / day</b>.</p>
+    </div>`) : ''}
+    ${(g.cfg.infeasible && g.cfg.infeasible.length) ? `<div class="alert bad" style="margin-top:14px">
+      <h4>Day ${g.cfg.infeasible.map(x => x.day).join(', ')}: no mission type fits this match budget</h4>
+      <p>Not one of the types you allowed can be completed reliably in
+         ${g.cfg.infeasible[0].matches} matches, so the day was filled with the most frequent
+         types available anyway. Raise that day's matches, or allow more common mission types.</p>
     </div>` : ''}
     ${(g.cfg.excluded && g.cfg.excluded.length) ? `<div class="alert warn" style="margin-top:14px">
       <h4>${g.cfg.excluded[0].types.length} mission type${g.cfg.excluded[0].types.length === 1 ? '' : 's'}
