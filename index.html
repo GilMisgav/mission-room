@@ -3668,6 +3668,7 @@ function buildConfig(spec, rates, tierOf){
       clean.length = 0; clean.push(...out2);
     }
     dayList.push({matches: dayMatches, budget: plan[d].budget * budgetMul, chest: !!plan[d].chest,
+      chestShare: plan[d].chestShare,
       missions: clean.map((t, i) => {
         const lambda = (rates[t] || 0) * dayMatches;
         return {index: i + 1, type: t,
@@ -3840,11 +3841,19 @@ function buildConfig(spec, rates, tierOf){
   dayList.forEach((d, i) => {
     cum += expByDay[i];
     cumConfigured += d.missions.reduce((a, m) => a + m.tokens, 0);
-    const chestShare = d.chest ? 0.6 : 0;
+    // How the day's money divides between finishing the missions and reaching the
+    // chest. Authored per day; 60% to the chest is only the default.
+    const share = d.chestShare != null ? Math.max(0, Math.min(1, d.chestShare)) : 0.6;
+    const chestShare = d.chest ? share : 0;
     const missionBudget = d.budget * (1 - chestShare);
     const payable = d.missions.filter(m => tierOf(m.type) !== 'easy');
     const per = payable.length ? missionBudget / payable.length : 0;
-    payable.forEach(m => { m.bonusCash = Math.max(0.1, Math.round(per * 10) / 10); });
+    // The 10¢ floor exists so a mission that IS meant to pay does not round to
+    // nothing. Send the whole day to the chest and the missions should pay zero —
+    // floor it there and the config quietly pays more than it was told to.
+    payable.forEach(m => {
+      m.bonusCash = missionBudget > 0 ? Math.max(0.1, Math.round(per * 10) / 10) : 0;
+    });
     if (d.chest){
       // Where the chest sits decides whether difficulty moves cost at all.
       //   auto  — at the tokens the run is EXPECTED to reach by the end of this day.
@@ -3857,7 +3866,8 @@ function buildConfig(spec, rates, tierOf){
         : Math.max(prevReq + 1, Math.round(cum * 0.9));
       prevReq = req;
       tiers.push({tierUid: `tier_${tiers.length + 1}`, tokensRequired: req, day: i + 1,
-        bonusCash: Math.max(0.1, Math.round(d.budget * chestShare * 10) / 10)});
+        bonusCash: chestShare > 0
+          ? Math.max(0.1, Math.round(d.budget * chestShare * 10) / 10) : 0});
     }
   });
 
@@ -4007,7 +4017,8 @@ const TIP = {
   // ── factory ──
   'nav.factory': '<span class="h">Factory</span>Generates a grid of complete configs and simulates every one, so you can compare 20–30 candidates on effort, cost and completion before committing to one.',
   'fx.types': '<span class="h">Which missions it may use</span>The pool the generator draws from. Types that measure zero under the current suit model are disabled — they can never be chosen. A chain cannot repeat a type, so select at least as many as your missions/day.',
-  'fx.schedule': '<span class="h">Per-day schedule</span>Each day gets its own match budget and its own bonus cash. Ramp them however you like — a quiet day 1 and a heavy day 3 is a normal shape. A day with a chest holds 60% of its money back for it, so that day pays once for finishing the missions and again when the bar reaches the mark.',
+  'fx.schedule': '<span class="h">Per-day schedule</span>Each day gets its own match budget, its own bonus cash, and its own split between the two ways that money is won. Ramp them however you like — a quiet day 1 and a heavy day 3 is a normal shape. A day with a chest pays once for finishing the missions and again when the bar reaches that day\'s mark; <b>% to chest</b> decides how the day\'s money divides between the two.',
+  'fx.daySplit': '<span class="h">% to chest</span>How much of this day\'s bonus cash is held back for the chest instead of being paid out on the missions themselves. <b>60</b> is the default: most of the money sits behind the bar, so the day rewards finishing the whole chain rather than picking off one mission.<br><br>It also moves what the run really costs, and not in the direction most people expect. Mission cash is spread only over the non-easy missions, which are the ones players are least likely to finish, so it lands about <b>56%</b> of the time. Chest cash lands <b>67%</b> (auto thresholds) to <b>79%</b> (fixed). Money moved to the chest is therefore money more likely to be paid: on a $6 design, 0% to chest paid $3.40 and 100% paid $4.05.<br><br>So <b>down</b> is the cheaper setting and pays as you go; <b>up</b> is more expensive and makes the day about finishing the whole chain. <b>0</b> pays everything on the missions and leaves the chest empty; <b>100</b> pays nothing until the bar is reached.<br><br>Only applies on a day that carries a chest.',
   'fx.dayMatches': '<span class="h">matches</span>How many matches this day assumes the player will play. Targets for that day are sized off it, and the simulation gives the player exactly this many.',
   'fx.dayBudget': '<span class="h">bonus cash $</span>Money this day hands out — split across its missions, and into its chest if it has one. This is the designed figure; what it actually pays depends on completion and is in the cost column.',
   'fx.dayChest': '<span class="h">chest</span>Whether a chest lands at the end of this day, set at the tokens the run is expected to have reached by then. Between 2 and 5 chests total (rule 11).',
@@ -4034,7 +4045,7 @@ const TIP = {
   'fx.count': '<span class="h">Configs</span>How many candidates to generate. They are laid out on a grid: effort varies across, budget varies down.',
   'fx.visible': '<span class="h">Visible slots</span>How many missions are open at once. The rest sit locked and covered, and one uncovers each time an open mission completes — so the tail of a chain only starts accruing after earlier missions finish. This is simulated properly, not approximated: a mission nobody completes blocks the slot behind it.',
   'fx.effort': '<span class="h">Effort</span>Targets as a share of what the matches/day budget is expected to yield. <b>0.4</b> most players clear; <b>1.0</b> is a coin flip by construction; <b>1.3</b> most will not finish.',
-  'fx.budget': '<span class="h">Budget $</span>Bonus cash per player the config is <i>designed</i> to pay — 40% across missions, 60% held in the chests. What it actually pays is lower, because not everyone completes and claims; the <b>cost</b> column is the simulated real figure.',
+  'fx.budget': '<span class="h">Budget $</span>Bonus cash per player the config is <i>designed</i> to pay, split between the missions and the chests by each day\'s <b>% to chest</b>. What it actually pays is lower, because not everyone completes and claims; the <b>cost</b> column is the simulated real figure.',
   'fx.players': '<span class="h">Sim players</span>Simulated players per config. More is smoother and slower; 400 is enough to rank a grid.',
   'fx.clear': '<span class="h">clear %</span>Share of players who complete every mission across the whole run. With visible slots below the daily cap this is usually low — the last missions never uncover in time.',
   'fx.compl': '<span class="h">completion %</span>Share of all served missions that get completed. The headline difficulty number.',
@@ -6042,7 +6053,9 @@ function fxSyncDayPlan(){
   const old = fxDayPlan;
   fxDayPlan = Array.from({length: days}, (_, i) => old[i] || {
     matches: 8, budget: 1, chest: days <= 5 ? true : (i + 1) % Math.ceil(days / 5) === 0,
+    chestPct: 60,
   });
+  fxDayPlan.forEach(d => { if (d.chestPct == null) d.chestPct = 60; });
   // rule 11: between 2 and 5 chests
   let n = fxDayPlan.filter(d => d.chest).length;
   if (n < 2){ for (let i = fxDayPlan.length - 1; i >= 0 && n < 2; i--)
@@ -6056,12 +6069,13 @@ function renderFxDayPlan(){
   const totalMatches = fxDayPlan.reduce((a, d) => a + (+d.matches || 0), 0);
   const totalMoney = fxDayPlan.reduce((a, d) => a + (+d.budget || 0), 0);
   $('#fxDayPlan').innerHTML = `
-    <div class="rowhead" style="grid-template-columns:56px 110px 110px 90px 1fr">
+    <div class="rowhead" style="grid-template-columns:56px 100px 110px 84px 96px 1fr">
       <span>day</span><span${tip('fx.dayMatches')}>matches</span>
-      <span${tip('fx.dayBudget')}>bonus cash $</span><span${tip('fx.dayChest')}>chest</span><span></span>
+      <span${tip('fx.dayBudget')}>bonus cash $</span><span${tip('fx.dayChest')}>chest</span>
+      <span${tip('fx.daySplit')}>% to chest</span><span></span>
     </div>
     ${fxDayPlan.map((d, i) => `
-      <div class="missionrow" data-day="${i}" style="grid-template-columns:56px 110px 110px 90px 1fr">
+      <div class="missionrow" data-day="${i}" style="grid-template-columns:56px 100px 110px 84px 96px 1fr">
         <span class="ix">${i + 1}</span>
         <input type="number" data-k="matches" value="${d.matches}" min="1" max="80">
         <input type="number" step="0.1" data-k="budget" value="${d.budget}" min="0">
@@ -6069,22 +6083,29 @@ function renderFxDayPlan(){
           <option value="1"${d.chest ? ' selected' : ''}>yes</option>
           <option value="0"${!d.chest ? ' selected' : ''}>no</option>
         </select>
+        <input type="number" data-k="chestPct" value="${d.chestPct}" min="0" max="100" step="5"
+          ${d.chest ? '' : 'disabled title="this day has no chest"'}>
         <span class="hint" style="margin:0">${d.chest
-          ? `pays $${fmt((+d.budget || 0) * 0.4, 2)} on the missions, $${fmt((+d.budget || 0) * 0.6, 2)} on the chest at the end of day ${i + 1}`
+          ? `pays $${fmt((+d.budget || 0) * (1 - (+d.chestPct || 0) / 100), 2)} on the missions,
+             $${fmt((+d.budget || 0) * ((+d.chestPct || 0) / 100), 2)} on the chest at the end of day ${i + 1}`
           : `pays $${fmt(+d.budget || 0, 2)} across this day's missions`}</span>
       </div>`).join('')}
     <p class="hint" style="margin-top:8px">
       <b>${totalMatches}</b> matches and <b>$${fmt(totalMoney, 2)}</b> across the run ·
       <b>${chests}</b> chest${chests === 1 ? '' : 's'}
       ${chests < 2 || chests > 5 ? '<span style="color:var(--lose)"> — rule 11 allows 2 to 5</span>' : ''}.
-      A day with a chest holds 60% of its money back for it, so the day pays once for finishing the
-      missions and again when the bar reaches that day's mark.</p>`;
+      A day with a chest splits its money between finishing the missions and reaching the bar —
+      <b>% to chest</b> sets that split per day, and ${chests ? `right now ${
+        [...new Set(fxDayPlan.filter(d => d.chest).map(d => +d.chestPct || 0))]
+          .sort((a2, b2) => a2 - b2).join('% / ')}%` : 'no day carries one'}
+      goes to the chest.</p>`;
 }
 $('#fxDayPlan').addEventListener('input', e => {
   const f = e.target.closest('[data-k]'); if (!f) return;
   const i = +f.closest('[data-day]').dataset.day;
   const k = f.dataset.k;
   fxDayPlan[i][k] = k === 'chest' ? f.value === '1' : +f.value;
+  if (k === 'chestPct') fxDayPlan[i].chestPct = Math.max(0, Math.min(100, +f.value || 0));
   renderFxDayPlan(); renderFactoryHint();
 });
 $('#fxDays').addEventListener('input', fxSyncDayPlan);
@@ -6119,7 +6140,8 @@ function fxSpec(){
     dailyCap: cap,
     visibleSlots: Math.max(1, Math.min(cap, +$('#fxVis').value || 3)),
     dayPlan: fxDayPlan.map(d => ({matches: Math.max(1, +d.matches || 8),
-      budget: Math.max(0, +d.budget || 0), chest: !!d.chest})),
+      budget: Math.max(0, +d.budget || 0), chest: !!d.chest,
+      chestShare: Math.max(0, Math.min(100, +d.chestPct ?? 60)) / 100})),
     comfort: (+$('#fxComfort').value || 70) / 100,
     claimRate: (+$('#fxClaim').value || 85) / 100,
     targetMin: Math.max(1, +$('#fxTgtMin').value || 1),
