@@ -3230,7 +3230,7 @@ function poissonSample(lambda, rng){
 // ── one player, one run ─────────────────────────────────────────────
 // days:   [{missions:[{type,target,tokens,bonusCash}]}]
 // rates:  {type: expected events per match}
-function simulatePlayer(days, rates, opts, rng, exposure){
+function simulatePlayer(days, rates, opts, rng, exposure, timing){
   const visible = Math.max(1, opts.visibleSlots);
   const claimRate = opts.claimRate ?? 1;
 
@@ -3240,7 +3240,7 @@ function simulatePlayer(days, rates, opts, rng, exposure){
   days.forEach((day, dayIdx) => {
     const queue = day.missions.map((m, slot) => ({m, slot}));
     const active = queue.splice(0, visible).map(x => ({...x, got: 0, open: 0}));
-    let dayDone = 0, dayTokens = 0;
+    let dayDone = 0, dayTokens = 0, lastCompleteMatch = 0;
     served += day.missions.length;
 
     // each day carries its own match budget — a ramp is a normal thing to author
@@ -3254,9 +3254,10 @@ function simulatePlayer(days, rates, opts, rng, exposure){
         if (exposure) exposure[dayIdx][a.slot] += 1;
         a.got += poissonSample(rates[a.m.type] || 0, rng);
         if (a.got >= a.m.target){
+          if (timing){ timing[dayIdx][a.slot].done++; timing[dayIdx][a.slot].at += match; }
           // completing it is not the same as claiming it — tokens reach the bar
           // only on claim, and an unclaimed mission pays nothing
-          dayDone++; completed++;
+          dayDone++; completed++; lastCompleteMatch = match;
           if (rng() < claimRate){
             dayTokens += a.m.tokens;
             missionCash += a.m.bonusCash || 0;
@@ -3267,6 +3268,11 @@ function simulatePlayer(days, rates, opts, rng, exposure){
       }
     }
     bar += dayTokens;
+    // the match at which the LAST mission of the day landed, when the day cleared
+    if (timing && dayDone === day.missions.length){
+      timing[dayIdx].cleared++;
+      timing[dayIdx].clearAt += lastCompleteMatch;
+    }
     perDay.push({done: dayDone, tokens: dayTokens, bar});
   });
   return {bar, missionCash, completed, served, matches, perDay};
@@ -3288,13 +3294,21 @@ function measureExposure(days, rates, opts, players, seed){
 function simulateConfig(cfg, rates, opts){
   const players = opts.players || 300;
   const rng = E.mulberry32(opts.seed || 12345);
+  // per day, per slot: how often it completed and at which match; plus how often
+  // the whole day cleared and at which match. This is what turns "how hard is it"
+  // into "how many matches does it actually take".
+  const timing = cfg.days.map(d => {
+    const row = d.missions.map(() => ({done: 0, at: 0}));
+    row.cleared = 0; row.clearAt = 0;
+    return row;
+  });
   const tiers = cfg.tiers;
   const acc = {bar: 0, missionCash: 0, chestCash: 0, completed: 0, served: 0, matches: 0,
     chests: 0, grand: 0, cleared: 0};
   const bars = [], tierHits = new Array(tiers.length).fill(0);
 
   for (let p = 0; p < players; p++){
-    const r = simulatePlayer(cfg.days, rates, opts, rng);
+    const r = simulatePlayer(cfg.days, rates, opts, rng, null, timing);
     acc.bar += r.bar; acc.missionCash += r.missionCash;
     acc.completed += r.completed; acc.served += r.served; acc.matches += r.matches;
     bars.push(r.bar);
@@ -3327,6 +3341,13 @@ function simulateConfig(cfg, rates, opts){
     costMission: acc.missionCash / n,
     costChest: acc.chestCash / n,
     costTotal: (acc.missionCash + acc.chestCash) / n,
+    // matches actually needed: per slot, and for the day as a whole
+    timing: timing.map((row, di) => ({
+      slots: row.map(x => ({rate: x.done / n, atMatch: x.done ? x.at / x.done : null})),
+      clearRate: row.cleared / n,
+      clearAtMatch: row.cleared ? row.clearAt / row.cleared : null,
+      matches: cfg.days[di].matches,
+    })),
   };
 }
 
@@ -3529,6 +3550,11 @@ const TIP = {
   'fx.targetMin': '<span class="h">Target min</span>Floor on every generated target. 1 is the natural floor — a target of 0 is not a mission.',
   'fx.targetMax': '<span class="h">Target max</span>Ceiling on every generated target. Without one, a type that fires 4.6 times a match asks for 120 of something on a 20-match day — arithmetically right, unreadable as a mission.',
   'fx.open': '<span class="h">open for</span>Matches this slot is actually open, measured by a calibration pass. Slots past the visible count start covered, so they get a fraction of the day — and their targets are sized against that fraction, not the whole day.',
+  'fx.solo': '<span class="h">matches needed</span>target ÷ the type\'s rate — how many matches of exposure this mission needs on its own, ignoring the queue. Compare it to <b>open for</b>: if it needs more matches than its slot is open, it cannot finish.',
+  'fx.solototal': '<span class="h">whole day, summed</span>The per-mission needs added up. Missions run in parallel while open, so this is an upper bound, not the day\'s real cost — the simulated <b>by match</b> figure beside it is.',
+  'fx.completes': '<span class="h">completes</span>Share of simulated players who finish this mission inside the day.',
+  'fx.atmatch': '<span class="h">by match</span>The match at which it typically lands, averaged over the players who finished it. On the footer row, the match at which the whole day clears.',
+  'fx.fits': '<span class="h">Fits the budget</span>Whether each day\'s deck sequence is no longer than the matches that day allows. A day needing more decks than its budget cannot be cleared even with purpose-built decks.',
   'fx.count': '<span class="h">Configs</span>How many candidates to generate. They are laid out on a grid: effort varies across, budget varies down.',
   'fx.visible': '<span class="h">Visible slots</span>How many missions are open at once. The rest sit locked and covered, and one uncovers each time an open mission completes — so the tail of a chain only starts accruing after earlier missions finish. This is simulated properly, not approximated: a mission nobody completes blocks the slot behind it.',
   'fx.effort': '<span class="h">Effort</span>Targets as a share of what the matches/day budget is expected to yield. <b>0.4</b> most players clear; <b>1.0</b> is a coin flip by construction; <b>1.3</b> most will not finish.',
@@ -5759,6 +5785,9 @@ function renderFactoryDetail(g){
         <th>slot</th><th${tip('m.type')}>type</th><th${tip('m.tier')}>tier</th>
         <th${tip('m.per_deck')}>per match</th><th${tip('fx.open')}>open for</th>
         <th${tip('b.mtarget')}>target</th>
+        <th${tip('fx.solo')}>matches needed</th>
+        <th${tip('fx.completes')}>completes</th>
+        <th${tip('fx.atmatch')}>by match</th>
         <th${tip('b.mtokens')}>tokens</th><th${tip('b.mbonus')}>bonus $</th>
         <th class="txt">opens</th></tr></thead><tbody>
         ${d.missions.map((x, j) => `<tr>
@@ -5768,10 +5797,36 @@ function renderFactoryDetail(g){
           <td class="muted">${x.openMatches != null ? fmt(x.openMatches, 1) : '—'}<span
             class="muted" style="font-size:10px">/${d.matches}</span></td>
           <td style="color:var(--gold)">${x.target}</td>
+          <td class="muted">${(() => { const r = m.types[x.type].per_deck;
+            return r > 0 ? fmtMatches(x.target / r) : '∞'; })()}</td>
+          ${(() => {
+            const sl = ((g.sim.timing || [])[i] || {slots: []}).slots[j];
+            if (!sl) return '<td class="muted">—</td><td class="muted">—</td>';
+            const col = sl.rate > .8 ? 'var(--win)' : sl.rate > .4 ? 'var(--warn)' : 'var(--lose)';
+            return `<td style="color:${col}">${pct(sl.rate)}</td>
+              <td class="muted">${sl.atMatch ? fmt(sl.atMatch, 1) : 'never'}</td>`;
+          })()}
           <td class="muted">${x.tokens}</td><td class="muted">${x.bonusCash ? '$' + fmt(x.bonusCash, 2) : '—'}</td>
           <td class="txt">${j < sp.visibleSlots ? 'open from the start'
             : `uncovers when ${j - sp.visibleSlots + 1} mission${j - sp.visibleSlots ? 's' : ''} above complete${j - sp.visibleSlots ? '' : 's'}`}</td>
         </tr>`).join('')}
+        ${(() => {
+          const t = (g.sim.timing || [])[i];
+          if (!t) return '';
+          const solo = d.missions.reduce((a2, x) => {
+            const r = m.types[x.type].per_deck; return a2 + (r > 0 ? x.target / r : 0); }, 0);
+          const ok = t.clearAtMatch != null && t.clearAtMatch <= d.matches;
+          return `<tr style="border-top:1px solid var(--line2)">
+            <td colspan="5" style="text-align:right;color:var(--muted)">whole day</td>
+            <td class="muted"${tipOnly('fx.solototal')}>${fmtMatches(solo)}</td>
+            <td style="color:${t.clearRate > .5 ? 'var(--win)' : t.clearRate > .2 ? 'var(--warn)' : 'var(--lose)'}">${pct(t.clearRate)}</td>
+            <td style="color:${ok ? 'var(--win)' : 'var(--lose)'}">${t.clearAtMatch ? fmt(t.clearAtMatch, 1) : '—'}<span
+              class="muted" style="font-size:10px">/${d.matches}</span></td>
+            <td colspan="3" class="txt">${t.clearAtMatch == null
+              ? '<span style="color:var(--lose)">the day rarely clears inside its budget</span>'
+              : ok ? `clears with ${fmt(d.matches - t.clearAtMatch, 1)} matches to spare`
+                   : 'needs more matches than the day allows'}</td></tr>`;
+        })()}
       </tbody></table></div></div>`).join('')}
     <h3 style="margin-top:14px">Chests</h3>
     <div class="chests">${g.cfg.tiers.map((t, i) => `<div class="chest ${g.sim.tierReach[i] > 0.5 ? 'hit' : ''}">
@@ -5779,10 +5834,63 @@ function renderFactoryDetail(g){
       <div class="d">${t.tokensRequired} tokens · ${pct(g.sim.tierReach[i])} reach</div></div>`).join('')}</div>
     <p class="hint">Expected tokens across the run: ${g.cfg.expTokens}. Simulated median bar:
       ${fmt(g.sim.barP50, 0)}.</p>
-    <div class="btnrow"><button class="act" id="fxLoad">Load config #${g.id} into Builder</button></div>
+    <div class="btnrow">
+      <button class="act" id="fxLoad">Load config #${g.id} into Builder</button>
+      <button class="act ghost" id="fxDecks">Build the decks for this config</button>
+    </div>
+    <div id="fxDeckOut"></div>
   </div>`;
   $('#fxLoad').onclick = () => loadFactoryConfig(g);
+  $('#fxDecks').onclick = () => buildFactoryDecks(g);
   $('#fxDetail').scrollIntoView({block: 'start'});
+}
+
+// Build the deck sequence each day of a generated config needs, and hold it
+// against that day's match budget. This is the join between the two halves of the
+// tool: the factory decides what to ask for, the maker decides what to deal.
+function buildFactoryDecks(g){
+  const {sp} = fxGrid;
+  $('#fxDeckOut').innerHTML = '<div class="loading">Building decks for each day…</div>';
+  setTimeout(() => {
+    const t0 = Date.now();
+    const days = g.cfg.days.map((d, i) => {
+      const missions = d.missions.map(x => ({type: x.type, target: x.target}));
+      const plan = M.makeDayPlan(missions, {suitModel: S.suit, maxDecks: 40,
+        seed: 11 + g.id * 31 + i, candidates: 90, verifyRuns: 0});
+      return {day: i + 1, budget: d.matches, plan, missions};
+    });
+    const totalDecks = days.reduce((a, x) => a + x.plan.matches, 0);
+    const totalBudget = days.reduce((a, x) => a + x.budget, 0);
+    const overruns = days.filter(x => x.plan.matches > x.budget);
+
+    $('#fxDeckOut').innerHTML = `
+      <div class="cards-grid" style="margin:14px 0">${statCards([
+        ['gold', 'Decks to serve', totalDecks, `across ${days.length} days`, 'dp.stacked'],
+        ['', 'Match budget', totalBudget, 'from the per-day schedule', 'fx.dayMatches'],
+        [overruns.length ? 'lose' : 'win', 'Fits the budget',
+          overruns.length ? `${overruns.length} day${overruns.length === 1 ? '' : 's'} over` : 'yes',
+          overruns.length ? 'needs more matches than allowed' : 'every day fits', 'fx.fits'],
+        ['', 'Compression', totalDecks ? (days.reduce((a, x) => a + (x.plan.matches ? x.budget : 0), 0) / totalDecks).toFixed(1) + '×' : '—',
+          'vs the budgeted matches', 'dp.compression'],
+      ])}</div>
+      ${days.map(x => `<div class="panel">
+        <h3>Day ${x.day} — ${x.plan.matches} deck${x.plan.matches === 1 ? '' : 's'} of a
+          ${x.budget}-match budget
+          ${x.plan.matches > x.budget ? '<span style="color:var(--lose)">· over budget</span>'
+            : '<span style="color:var(--win)">· fits</span>'}</h3>
+        ${x.plan.blocked.length ? `<p class="hint" style="color:var(--lose)">
+          ${x.plan.blocked.length} mission${x.plan.blocked.length === 1 ? '' : 's'} cannot be delivered by
+          any deck under the ${S.suit} suit model: ${x.plan.blocked.map(t => `<span class="mono">${t}</span>`).join(', ')}</p>` : ''}
+        <pre class="json" style="max-height:300px">${esc(x.plan.decks.map((d, k) =>
+          `${String(k + 1).padStart(3)}  ${d.cards}   ${Object.entries(d.credited)
+            .map(([t, v]) => t + ' ×' + v).join(', ')}`).join('\n') || '(nothing to build)')}</pre>
+      </div>`).join('')}
+      <p class="hint">Built in ${Date.now() - t0} ms. These are purpose-built decks — serving them makes
+      the chain far easier than the targets imply, because a stacked deck removes the wait for rare
+      events. The budget comparison above is the check that matters: a day needing more decks than its
+      match budget cannot be cleared even with stacking.</p>`;
+    $('#fxDeckOut').scrollIntoView({block: 'start'});
+  }, 20);
 }
 
 // hand a generated config to the Builder so it can be validated and exported
