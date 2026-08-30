@@ -175,6 +175,7 @@
   table.decks td.cards{white-space:nowrap;font-family:var(--mono);font-size:11px;
     letter-spacing:.4px;color:var(--cream);user-select:all;width:1%}
   table.decks td.txt{min-width:240px;max-width:none}
+  .hint{font-size:11.5px;color:var(--muted);margin-top:5px;line-height:1.55}
   .typegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:5px 12px;
     margin-bottom:10px}
   .typegrid label{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11.5px;
@@ -185,17 +186,10 @@
   .typegrid .cat{grid-column:1/-1;font-family:var(--serif);font-style:italic;font-size:13px;
     color:var(--gold);margin-top:8px}
   .typegrid .rate{margin-left:auto;color:var(--muted);font-size:10.5px}
-    <h3 style="margin-top:16px" data-tip="fx.types" tabindex="0">Which missions it may use</h3>
-    <div class="btnrow" style="margin:0 0 10px">
-      <button class="act ghost sm" data-fxsel="playable">All playable</button>
-      <button class="act ghost sm" data-fxsel="easy">Easy only</button>
-      <button class="act ghost sm" data-fxsel="easymed">Easy + challenging-easy</button>
-      <button class="act ghost sm" data-fxsel="inmatch">Opening hand only</button>
-      <button class="act ghost sm" data-fxsel="none">Clear</button>
-    </div>
-    <div id="fxTypes"></div>
-    <h3 style="margin-top:16px" data-tip="fx.schedule" tabindex="0">Per-day schedule</h3>
   .spark{display:flex;align-items:flex-end;gap:2px;height:54px;margin-top:6px}
+  .bar-x{display:flex;gap:2px;margin-top:5px}
+  .bar-x span{flex:1;text-align:center;font-family:var(--mono);font-size:9px;color:var(--muted);
+    min-width:0;overflow:hidden}
   .spark i{flex:1;background:var(--gold-dim);border-radius:1px 1px 0 0;min-height:1px;display:block}
   .spark i.on{background:var(--gold)}
   .loading{color:var(--muted);font-family:var(--mono);font-size:12px;padding:26px 0}
@@ -3553,6 +3547,26 @@ function buildConfig(spec, rates, tierOf){
         bonusCash: Math.max(0.1, Math.round(d.budget * chestShare * 10) / 10)});
     }
   });
+
+  // Rule 11 is a hard upload gate: between 2 and 5 chests. The day schedule can ask
+  // for more (nothing stops a user ticking a chest on every one of 8 days), so cap
+  // it here rather than emitting a bundle that is rejected. Keep the LAST five —
+  // they are the top of the ladder and the ones worth reaching.
+  if (tiers.length > 5){
+    const kept = tiers.slice(-5);
+    tiers.length = 0; tiers.push(...kept);
+    tiers.forEach((t, i) => { t.tierUid = `tier_${i + 1}`; });
+  }
+  // and if the schedule asked for fewer than two, split the top one so the ladder
+  // still has a rung to climb
+  if (tiers.length === 1){
+    const only = tiers[0];
+    tiers.unshift({tierUid: 'tier_1', day: only.day,
+      tokensRequired: Math.max(1, Math.round(only.tokensRequired * 0.45)),
+      bonusCash: Math.max(0.1, Math.round(only.bonusCash * 0.35 * 10) / 10)});
+    only.tierUid = 'tier_2';
+    only.bonusCash = Math.max(0.1, Math.round(only.bonusCash * 0.65 * 10) / 10);
+  }
 
   const expTokens = expByDay.reduce((a, b) => a + b, 0);
   return {days: dayList, tiers, dailyCap: cap, arc, comfortUsed: cap ? nComfort / cap : 0,
