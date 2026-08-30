@@ -3447,16 +3447,38 @@ function buildConfig(spec, rates, tierOf){
   // rotate the starting offset per day so days differ even from a small pool
   const rot = (arr, k) => arr.length ? arr.slice(k % arr.length).concat(arr.slice(0, k % arr.length)) : arr;
 
+  // A type is only a candidate for a day if the day's match budget can plausibly
+  // deliver even the SMALLEST legal target. Without this the generator happily
+  // places a 0.019-per-match type in a 10-match day: target 1 still needs ~51
+  // matches of exposure, so the mission reads as impossible however the targets
+  // are solved. Filter by achievability first, then pick by difficulty.
+  const minTarget = Math.max(1, spec.targetMin || 1);
+  const floor = spec.mode === 'completion'
+    ? Math.min(spec.completion ?? 0.8, 0.6)
+    : 0.35;
+  const canDo = (t, dayMatches) =>
+    poissonTail(minTarget, (rates[t] || 0) * dayMatches) >= floor;
+  const excluded = [];
+
   const dayList = [];
   for (let d = 0; d < days; d++){
     const dayMatches = plan[d].matches;
+    // drop what this day cannot deliver, but never let a bucket empty out
+    const keep = arr => { const ok = arr.filter(t => canDo(t, dayMatches));
+      return ok.length ? ok : arr; };
+    const cut = pool.filter(t => !canDo(t, dayMatches));
+    if (cut.length) excluded.push({day: d + 1, matches: dayMatches, types: cut,
+      worst: cut.map(t => ({type: t, matchesNeeded: (rates[t] || 0) > 0
+        ? Math.round(minTarget / rates[t]) : Infinity}))
+        .sort((a2, b2) => b2.matchesNeeded - a2.matchesNeeded).slice(0, 4)});
     const used = new Set();
     // with variety, each config+day shuffles its buckets instead of walking them
     // in rate order, so different configs pick genuinely different missions
-    const dEasy = vr ? shuffle(easy) : rot(easy, d);
-    const dMid  = vr ? shuffle(mid)  : rot(mid, d);
-    const dHard = vr ? shuffle(hard) : rot(hard, d);
-    const dPool = vr ? shuffle(pool) : rot(pool, d);
+    const kEasy = keep(easy), kMid = keep(mid), kHard = keep(hard), kPool = keep(pool);
+    const dEasy = vr ? shuffle(kEasy) : rot(kEasy, d);
+    const dMid  = vr ? shuffle(kMid)  : rot(kMid, d);
+    const dHard = vr ? shuffle(kHard) : rot(kHard, d);
+    const dPool = vr ? shuffle(kPool) : rot(kPool, d);
     const draw = arr => { for (const t of arr) if (!used.has(t)) { used.add(t); return t; } return null; };
     const any = () => draw(dPool);
     const pick = () => draw(dEasy) || draw(dMid) || draw(dHard) || any();
@@ -3499,19 +3521,70 @@ function buildConfig(spec, rates, tierOf){
   // Second pass: re-size every target against the matches its slot is really open
   // for. Without this the locked slots carry targets sized for a window they never
   // get, which is what drags completion down long before the effort dial explains it.
-  if (spec.calibrate !== false && spec.visibleSlots < cap){
-    const exp = measureExposure(dayList, rates,
-      {visibleSlots: spec.visibleSlots, claimRate: 1}, 120, 4242);
-    dayList.forEach((d, di) => d.missions.forEach((m, si) => {
-      const open = Math.max(1, exp[di][si]);
-      m.openMatches = +open.toFixed(1);
-      const lambda = (rates[m.type] || 0) * open;
-      m.target = spec.mode === 'completion'
-        ? solveTargetForCompletion(lambda, spec.completion, spec)
-        : clampTarget(lambda * effort, spec);
-    }));
-  } else {
-    dayList.forEach(d => d.missions.forEach(m => { m.openMatches = d.matches; }));
+  // Set every target for a given completion ask (or effort), re-measuring slot
+  // exposure as it goes — the two depend on each other, since easier targets free
+  // a slot sooner and lengthen the window for whatever is queued behind it.
+  const applyTargets = (pEff) => {
+    if (spec.calibrate !== false && spec.visibleSlots < cap){
+      for (let pass = 0; pass < 2; pass++){
+        const exp = measureExposure(dayList, rates,
+          {visibleSlots: spec.visibleSlots, claimRate: 1}, 80, 4242 + pass);
+        dayList.forEach((d, di) => d.missions.forEach((m, si) => {
+          const open = Math.max(1, exp[di][si]);
+          m.openMatches = +open.toFixed(1);
+          const lambda = (rates[m.type] || 0) * open;
+          m.target = spec.mode === 'completion'
+            ? solveTargetForCompletion(lambda, pEff, spec)
+            : clampTarget(lambda * effort, spec);
+        }));
+      }
+    } else {
+      dayList.forEach(d => d.missions.forEach(m => {
+        m.openMatches = d.matches;
+        const lambda = (rates[m.type] || 0) * d.matches;
+        m.target = spec.mode === 'completion'
+          ? solveTargetForCompletion(lambda, pEff, spec)
+          : clampTarget(lambda * effort, spec);
+      }));
+    }
+  };
+  applyTargets(spec.completion);
+
+  // Solving each mission against its own exposure still lands optimistic in
+  // aggregate — asked 45% delivered 67%. The per-mission model cannot see that a
+  // mission finishing early hands the rest of the day to the ones behind it. So
+  // close the loop on the number that is actually claimed: bisect the effective ask
+  // until the SIMULATED completion matches what was requested.
+  let calibratedAsk = spec.completion;
+  if (spec.mode === 'completion' && spec.calibrateOutcome !== false){
+    const ask = spec.completion;
+    const measure = () => simulateConfig({days: dayList, tiers: []}, rates,
+      {players: 220, visibleSlots: spec.visibleSlots, claimRate: 1, seed: 991}).completionPct;
+    // Bracket before bisecting. Jumping straight to the midpoint of [0.02, 0.995]
+    // moves the ask by half the range on the first step and can overshoot past the
+    // answer faster than five iterations recover.
+    let pEff = ask, lo = null, hi = null;
+    let cur = measure();
+    if (Math.abs(cur - ask) >= 0.015){
+      const goDown = cur > ask;
+      let q = pEff;
+      for (let k = 0; k < 5; k++){
+        q = goDown ? Math.max(0.02, q * 0.6) : Math.min(0.995, q + (0.995 - q) * 0.5);
+        applyTargets(q);
+        const v = measure();
+        if (goDown ? v <= ask : v >= ask){ if (goDown){ lo = q; hi = pEff; } else { lo = pEff; hi = q; } break; }
+        pEff = q;
+      }
+      if (lo === null){ lo = goDown ? 0.02 : pEff; hi = goDown ? pEff : 0.995; }
+      for (let it = 0; it < 6; it++){
+        pEff = (lo + hi) / 2;
+        applyTargets(pEff);
+        const v = measure();
+        if (Math.abs(v - ask) < 0.015) break;
+        if (v > ask) hi = pEff; else lo = pEff;
+      }
+    }
+    calibratedAsk = pEff;
   }
 
   // Each day's money is spent on that day. If the day carries a chest, part of it
@@ -3569,7 +3642,7 @@ function buildConfig(spec, rates, tierOf){
   }
 
   const expTokens = expByDay.reduce((a, b) => a + b, 0);
-  return {days: dayList, tiers, dailyCap: cap, arc, comfortUsed: cap ? nComfort / cap : 0,
+  return {days: dayList, tiers, dailyCap: cap, arc, excluded, calibratedAsk, comfortUsed: cap ? nComfort / cap : 0,
     expTokens: +expTokens.toFixed(1),
     expByDay: expByDay.map(v => +v.toFixed(1)), spec};
 }
@@ -3589,9 +3662,15 @@ function clampTarget(raw, spec){
 // the largest target that still leaves at least `p` of players completing it.
 function solveTargetForCompletion(lambda, p, spec){
   if (!(lambda > 0)) return clampTarget(1, spec);
-  let best = 1;
+  // Targets are integers, so no target hits p exactly. Taking the largest target
+  // that still clears p biases every mission upward — asked 45% came out at 72%.
+  // Pick the target whose completion sits CLOSEST to the ask instead.
+  let best = 1, bestGap = Infinity;
   for (let t = 1; t <= 400; t++){
-    if (poissonTail(t, lambda) >= p) best = t; else break;
+    const tail = poissonTail(t, lambda);
+    const gap = Math.abs(tail - p);
+    if (gap < bestGap){ bestGap = gap; best = t; }
+    if (tail < p * 0.2 && t > 1) break;          // well past it, stop scanning
   }
   return clampTarget(best, spec);
 }
@@ -3696,7 +3775,7 @@ const TIP = {
   'fx.arc': '<span class="h">order</span>How each day is ordered. <b>easy-first</b> puts the most reachable missions in the open slots. <b>gentle-ramp</b> keeps the open slots reachable then reverses the covered tail, so the day finishes on its hardest. <b>alternating</b> weaves easy and hard. Slot 1 is always the most reachable, whatever the arc — otherwise the chain stalls behind a mission nobody finishes.',
   'fx.chestMode': '<span class="h">Chest thresholds</span>Where the chests sit, and it decides whether difficulty moves your cost at all.<br><br><b>Auto</b> places each chest at the tokens the run is <i>expected</i> to reach. Harder targets yield fewer tokens, but the threshold drops with them, so the reach rate and the payout hardly change — cost then depends almost entirely on the budget axis.<br><br><b>Fixed</b> places them at absolute token levels, the same for every config. Now a harder config misses its chests and pays less: on one grid, cost fell from $3.36 to $0.48 across the difficulty axis while the budget stayed at $7.60.',
   'fx.mode': '<span class="h">Difficulty dial</span><b>Target completion %</b> solves each target so roughly that share of players finish it — say what you want and it works backwards. <b>Effort ×</b> asks for a share of the expected count instead, which fixes completion as a side effect: effort 1.0 always lands near 50%, because the target is the average.',
-  'fx.completion': '<span class="h">Completion %</span>The share of players who should finish each mission. The grid varies it across the columns, so you see the whole difficulty range at once. Delivered completion runs a little under the asked figure — a mission that uncovers late gets less of the day than the solve assumed.',
+  'fx.completion': '<span class="h">Completion %</span>The share of players who should finish each mission. The grid varies it across the columns, so you see the whole difficulty range at once.<br><br>Targets are first solved from the Poisson tail at each slot\'s measured exposure, then <b>calibrated against the simulation</b> — the effective ask is bisected until delivered completion matches what you requested. Median gap about 5 points; the residual is granularity, since a chain of N missions can only move completion in 1/N steps.',
   'fx.targetMin': '<span class="h">Target min</span>Floor on every generated target. 1 is the natural floor — a target of 0 is not a mission.',
   'fx.targetMax': '<span class="h">Target max</span>Ceiling on every generated target. Without one, a type that fires 4.6 times a match asks for 120 of something on a 20-match day — arithmetically right, unreadable as a mission.',
   'fx.open': '<span class="h">open for</span>Matches this slot is actually open, measured by a calibration pass. Slots past the visible count start covered, so they get a fraction of the day — and their targets are sized against that fraction, not the whole day.',
@@ -5850,10 +5929,27 @@ function renderFactoryHint(){
            to cost less.`
         : `<br><b>Fixed chest thresholds:</b> the same absolute token levels for every config, so a
            harder config misses its chests and genuinely pays less.`}
+      ${(() => {
+        const m2 = mdl(); if (!m2 || !fxTypes) return '';
+        const minT = sp.targetMin;
+        const floor = sp.mode === 'completion' ? Math.min(sp.completionMin, 0.6) : 0.35;
+        const tail = (k, l) => { if (k <= 0) return 1; if (!(l > 0)) return 0;
+          let t2 = Math.exp(-l), c = t2; for (let i = 1; i <= k - 1; i++){ t2 *= l / i; c += t2; }
+          return Math.max(0, Math.min(1, 1 - c)); };
+        const sel = [...fxTypes].filter(t => m2.types[t].per_deck > 0);
+        const worstDay = sp.dayPlan.reduce((a2, d) => d.matches < a2 ? d.matches : a2, Infinity);
+        const dropped = sel.filter(t => tail(minT, m2.types[t].per_deck * worstDay) < floor);
+        return dropped.length
+          ? `<br><b>${dropped.length} of ${sel.length} selected types</b> cannot be delivered on the
+             shortest day (${worstDay} matches) and will be skipped there — a target of 1 alone would
+             need more matches than the day has.`
+          : `<br>All ${sel.length} selected types are deliverable on every day of the schedule.`;
+      })()}
       <br>${sp.mode === 'completion'
-        ? `Targets are solved so roughly the asked-for share of players finish each mission. The
-           delivered figure lands slightly under it, because a mission that uncovers late gets less of
-           the day than the solve assumed.`
+        ? `Targets are solved so the asked-for share of players finishes, then calibrated against the
+           simulation itself until delivered completion matches the ask — median gap about 5 points.
+           The residual is granularity: with ${sp.dailyCap} missions a day, completion can only move in
+           steps of about ${(100 / (sp.dailyCap * sp.dayPlan.length)).toFixed(0)} points.`
         : `<b>Effort is target ÷ expected count</b>, so effort 1.0 sits near 50% completion by
            construction — the target <i>is</i> the average. Use 0.4–0.6 for a chain most players clear,
            or switch the dial to target completion % and say it directly.`}`;
@@ -6094,6 +6190,16 @@ function renderFactoryDetail(g){
         </div>`;
       })()}
       </div>`).join('')}
+    ${(g.cfg.excluded && g.cfg.excluded.length) ? `<div class="alert warn" style="margin-top:14px">
+      <h4>${g.cfg.excluded[0].types.length} mission type${g.cfg.excluded[0].types.length === 1 ? '' : 's'}
+        were ruled out — the day's matches cannot deliver them</h4>
+      <p>A type is only a candidate if the day's match budget can plausibly deliver even a target of 1.
+        On a ${g.cfg.excluded[0].matches}-match day these need far more exposure than that, so they would
+        read as impossible whatever target was set:</p>
+      <p>${g.cfg.excluded[0].worst.map(w =>
+        `<code>${w.type}</code> needs ~${w.matchesNeeded} matches`).join(' · ')}</p>
+      <p>Raise that day's matches, or lower the asked completion, to bring them back into play.</p>
+    </div>` : ''}
     <h3 style="margin-top:14px">Chests</h3>
     <div class="chests">${g.cfg.tiers.map((t, i) => `<div class="chest ${g.sim.tierReach[i] > 0.5 ? 'hit' : ''}">
       <div class="t">chest ${i + 1}</div><div class="n">$${fmt(t.bonusCash, 2)}</div>
