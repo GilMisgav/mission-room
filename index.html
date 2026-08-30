@@ -509,6 +509,11 @@
       <div class="narrow"><label class="f" data-tip="bar.claim" tabindex="0">Claim %</label><input type="number" id="fxClaim" value="85" min="0" max="100"></div>
       <div class="narrow"><label class="f" data-tip="fx.targetMin" tabindex="0">Target min</label><input type="number" id="fxTgtMin" value="1" min="1" max="99"></div>
       <div class="narrow"><label class="f" data-tip="fx.targetMax" tabindex="0">Target max</label><input type="number" id="fxTgtMax" value="20" min="1" max="200"></div>
+      <div><label class="f" data-tip="fx.variety" tabindex="0">Variety</label><select id="fxVariety">
+        <option value="1" selected>Moderate — each config a different chain</option>
+        <option value="2">High — wider spread in types and tokens</option>
+        <option value="0">None — pure difficulty sweep</option>
+      </select></div>
       <div><label class="f" data-tip="fx.chestMode" tabindex="0">Chest thresholds</label><select id="fxChestMode">
         <option value="auto" selected>Auto — scale with what the run yields</option>
         <option value="fixed">Fixed — absolute token levels</option>
@@ -3387,8 +3392,28 @@ function buildConfig(spec, rates, tierOf){
   // Tracking `used` across the whole run instead exhausts the pool and starts
   // emitting duplicates inside a chain, which upload rejects.
   const cap = Math.min(dailyCap, pool.length);
-  const nComfort = Math.round(cap * comfort);
   const TOKENS = {easy: 4, medium: 8, hard: 14};
+
+  // Variety. With it off, every config in the grid draws the same types in the same
+  // order and only the targets move — 24 near-identical candidates. With it on,
+  // each config gets its own seeded composition: which types, in what order, with
+  // what token weights. The two grid axes stay the controlled comparison; this makes
+  // the configs actually different things to choose between.
+  const vr = spec.variety || 0;                       // 0 none · 1 moderate · 2 high
+  const rng = E.mulberry32(((spec.variantSeed || 1) * 2654435761) >>> 0);
+  const shuffle = arr => { const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--){ const j = Math.floor(rng() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a; };
+  const jitter = amt => 1 + (rng() * 2 - 1) * amt * vr;
+
+  // comfort ratio wobbles per config, so the easy/stretch split differs too
+  const nComfort = Math.max(0, Math.min(cap, Math.round(cap * comfort * jitter(0.18))));
+  // token weights wobble per config, which moves where the bar sits
+  const tokenScale = {easy: jitter(0.3), medium: jitter(0.3), hard: jitter(0.3)};
+  // how the day is ordered once picked — never puts a hard mission in slot 1,
+  // which would stall the chain behind something nobody finishes
+  const ARCS = ['easy-first', 'gentle-ramp', 'alternating'];
+  const arc = vr ? ARCS[Math.floor(rng() * ARCS.length)] : 'easy-first';
 
   // rotate the starting offset per day so days differ even from a small pool
   const rot = (arr, k) => arr.length ? arr.slice(k % arr.length).concat(arr.slice(0, k % arr.length)) : arr;
@@ -3397,7 +3422,12 @@ function buildConfig(spec, rates, tierOf){
   for (let d = 0; d < days; d++){
     const dayMatches = plan[d].matches;
     const used = new Set();
-    const dEasy = rot(easy, d), dMid = rot(mid, d), dHard = rot(hard, d), dPool = rot(pool, d);
+    // with variety, each config+day shuffles its buckets instead of walking them
+    // in rate order, so different configs pick genuinely different missions
+    const dEasy = vr ? shuffle(easy) : rot(easy, d);
+    const dMid  = vr ? shuffle(mid)  : rot(mid, d);
+    const dHard = vr ? shuffle(hard) : rot(hard, d);
+    const dPool = vr ? shuffle(pool) : rot(pool, d);
     const draw = arr => { for (const t of arr) if (!used.has(t)) { used.add(t); return t; } return null; };
     const any = () => draw(dPool);
     const pick = () => draw(dEasy) || draw(dMid) || draw(dHard) || any();
@@ -3411,7 +3441,20 @@ function buildConfig(spec, rates, tierOf){
     // easiest first: the visible slots should open on something reachable, or the
     // chain stalls behind a mission nobody finishes and the tail never uncovers
     const clean = types.filter(Boolean);
-    clean.sort((a, b) => (rates[b] || 0) - (rates[a] || 0));
+    clean.sort((a, b) => (rates[b] || 0) - (rates[a] || 0));   // easiest first
+    if (arc === 'gentle-ramp'){
+      // keep the open slots reachable, then reverse the covered tail so the day
+      // finishes on its hardest mission rather than opening with it
+      const head = clean.slice(0, spec.visibleSlots), tail = clean.slice(spec.visibleSlots);
+      clean.length = 0; clean.push(...head, ...tail.reverse());
+    } else if (arc === 'alternating'){
+      const out2 = [], a2 = clean.slice();
+      while (a2.length){ out2.push(a2.shift()); if (a2.length) out2.push(a2.pop()); }
+      // slot 1 must still be the most reachable
+      const bestIdx = out2.reduce((bi, t, i) => (rates[t] || 0) > (rates[out2[bi]] || 0) ? i : bi, 0);
+      if (bestIdx) { const [b2] = out2.splice(bestIdx, 1); out2.unshift(b2); }
+      clean.length = 0; clean.push(...out2);
+    }
     dayList.push({matches: dayMatches, budget: plan[d].budget * budgetMul, chest: !!plan[d].chest,
       missions: clean.map((t, i) => {
         const lambda = (rates[t] || 0) * dayMatches;
@@ -3419,7 +3462,8 @@ function buildConfig(spec, rates, tierOf){
           target: spec.mode === 'completion'
             ? solveTargetForCompletion(lambda, spec.completion, spec)
             : clampTarget(lambda * effort, spec),
-          tokens: TOKENS[tierOf(t)] || 8, bonusCash: 0};
+          tokens: Math.max(1, Math.round((TOKENS[tierOf(t)] || 8) * (tokenScale[tierOf(t)] || 1))),
+          bonusCash: 0};
       })});
   }
 
@@ -3476,7 +3520,8 @@ function buildConfig(spec, rates, tierOf){
   });
 
   const expTokens = expByDay.reduce((a, b) => a + b, 0);
-  return {days: dayList, tiers, dailyCap: cap, expTokens: +expTokens.toFixed(1),
+  return {days: dayList, tiers, dailyCap: cap, arc, comfortUsed: cap ? nComfort / cap : 0,
+    expTokens: +expTokens.toFixed(1),
     expByDay: expByDay.map(v => +v.toFixed(1)), spec};
 }
 
@@ -3528,7 +3573,7 @@ function generateGrid(base, rates, tierOf, opts){
       const effort = isComp ? 1 : +lerp(opts.effortMin, opts.effortMax, c, cols).toFixed(3);
       const completion = isComp
         ? +lerp(opts.completionMin, opts.completionMax, c, cols).toFixed(3) : base.completion;
-      const spec = {...base, effort, completion, budgetMul};
+      const spec = {...base, effort, completion, budgetMul, variantSeed: out.length + 1};
       const cfg = buildConfig(spec, rates, tierOf);
       const budget = +cfg.days.reduce((a, d) => a + d.budget, 0).toFixed(2);
       out.push({id: out.length + 1, effort, completion, budgetMul, budget, cfg});
@@ -3593,6 +3638,9 @@ const TIP = {
   'fx.dayBudget': '<span class="h">bonus cash $</span>Money this day hands out — split across its missions, and into its chest if it has one. This is the designed figure; what it actually pays depends on completion and is in the cost column.',
   'fx.dayChest': '<span class="h">chest</span>Whether a chest lands at the end of this day, set at the tokens the run is expected to have reached by then. Between 2 and 5 chests total (rule 11).',
   'fx.budgetmul': '<span class="h">Budget ×</span>Multiplier over the whole per-day money schedule. 0.5× halves every day, 2× doubles it — the shape you authored is kept, only the scale varies across the grid.',
+  'fx.variety': '<span class="h">Variety</span>With variety off, every config in the grid draws the same missions in the same order and only the targets move — 24 near-identical candidates. On, each config gets its own seeded composition: which types it picks, how they are ordered, and how the token weights fall. The two grid axes stay the controlled comparison; this makes the configs genuinely different things to choose between.',
+  'fx.mix': '<span class="h">mix</span>How many missions across the whole run fall in each difficulty tier — <b>E</b>asy, <b>M</b>edium (challenging-easy), <b>H</b>ard (challenging). The quickest way to see that two configs are actually different chains.',
+  'fx.arc': '<span class="h">order</span>How each day is ordered. <b>easy-first</b> puts the most reachable missions in the open slots. <b>gentle-ramp</b> keeps the open slots reachable then reverses the covered tail, so the day finishes on its hardest. <b>alternating</b> weaves easy and hard. Slot 1 is always the most reachable, whatever the arc — otherwise the chain stalls behind a mission nobody finishes.',
   'fx.chestMode': '<span class="h">Chest thresholds</span>Where the chests sit, and it decides whether difficulty moves your cost at all.<br><br><b>Auto</b> places each chest at the tokens the run is <i>expected</i> to reach. Harder targets yield fewer tokens, but the threshold drops with them, so the reach rate and the payout hardly change — cost then depends almost entirely on the budget axis.<br><br><b>Fixed</b> places them at absolute token levels, the same for every config. Now a harder config misses its chests and pays less: on one grid, cost fell from $3.36 to $0.48 across the difficulty axis while the budget stayed at $7.60.',
   'fx.mode': '<span class="h">Difficulty dial</span><b>Target completion %</b> solves each target so roughly that share of players finish it — say what you want and it works backwards. <b>Effort ×</b> asks for a share of the expected count instead, which fixes completion as a side effect: effort 1.0 always lands near 50%, because the target is the average.',
   'fx.completion': '<span class="h">Completion %</span>The share of players who should finish each mission. The grid varies it across the columns, so you see the whole difficulty range at once. Delivered completion runs a little under the asked figure — a mission that uncovers late gets less of the day than the solve assumed.',
@@ -5699,6 +5747,7 @@ function fxSpec(){
     targetMax: Math.max(1, +$('#fxTgtMax').value || 20),
     mode: $('#fxMode').value,
     chestMode: $('#fxChestMode').value,
+    variety: +$('#fxVariety').value,
     completionMin: (+$('#fxCompMin').value || 95) / 100,
     completionMax: (+$('#fxCompMax').value || 45) / 100,
     players: Math.max(50, +$('#fxPlayers').value || 400),
@@ -5756,7 +5805,7 @@ function renderFactoryHint(){
            construction — the target <i>is</i> the average. Use 0.4–0.6 for a chain most players clear,
            or switch the dial to target completion % and say it directly.`}`;
 }
-['#fxN','#fxCap','#fxVis','#fxComfort','#fxClaim','#fxTgtMin','#fxTgtMax','#fxChestMode',
+['#fxN','#fxCap','#fxVis','#fxComfort','#fxClaim','#fxTgtMin','#fxTgtMax','#fxChestMode','#fxVariety',
  '#fxEffMin','#fxEffMax','#fxBudMin','#fxBudMax','#fxPlayers']
   .forEach(x => $(x).addEventListener('input', renderFactoryHint));
 
@@ -5782,7 +5831,7 @@ $('#fxGo').addEventListener('click', () => {
   setTimeout(() => {
     const t0 = Date.now();
     const base = {dailyCap: sp.dailyCap, visibleSlots: sp.visibleSlots,
-      dayPlan: sp.dayPlan, comfort: sp.comfort, pool, mode: sp.mode, chestMode: sp.chestMode,
+      dayPlan: sp.dayPlan, comfort: sp.comfort, pool, mode: sp.mode, chestMode: sp.chestMode, variety: sp.variety,
       completion: sp.completionMin,
       targetMin: sp.targetMin, targetMax: sp.targetMax};
     const grid = F.generateGrid(base, rates, tierOf, sp);
@@ -5815,6 +5864,13 @@ function renderFactory(ms){
       ? ['completion', 'asked', g => pct(g.completion), 'fx.completion']
       : ['effort', 'effort', g => g.effort.toFixed(2), 'fx.effort'],
     ['budget', 'budget $', g => g.budget.toFixed(2), 'fx.budget'],
+    ['mix', 'mix', g => {
+      const m2 = mdl(); if (!m2) return '—';
+      const c = {easy: 0, medium: 0, hard: 0};
+      g.cfg.days.forEach(d => d.missions.forEach(x => { c[m2.types[x.type].tier]++; }));
+      return `<span class="tier-easy">${c.easy}E</span> <span class="tier-medium">${c.medium}M</span> <span class="tier-hard">${c.hard}H</span>`;
+    }, 'fx.mix'],
+    ['arc', 'order', g => g.cfg.arc || '—', 'fx.arc'],
     ['completionPct', 'completion', g => pct(g.sim.completionPct), 'fx.compl'],
     ['clearedPct', 'clear all', g => pct(g.sim.clearedPct), 'fx.clear'],
     ['avgMatches', 'matches used', g => fmt(g.sim.avgMatches, 1), 'e.effort'],
@@ -5825,6 +5881,12 @@ function renderFactory(ms){
   ];
   const rows = grid.slice().sort((a, b) => {
     const k = fxSort.key;
+    if (k === 'mix' || k === 'arc'){
+      const key = x => k === 'arc' ? (x.cfg.arc || '')
+        : x.cfg.days.reduce((n, d) => n + d.missions.length, 0);
+      const va2 = key(a), vb2 = key(b);
+      return (va2 > vb2 ? 1 : va2 < vb2 ? -1 : 0) * fxSort.dir;
+    }
     const own = ['id','effort','budget','completion'];
     const va = own.includes(k) ? a[k] : a.sim[k];
     const vb = own.includes(k) ? b[k] : b.sim[k];
