@@ -509,6 +509,10 @@
       <div class="narrow"><label class="f" data-tip="bar.claim" tabindex="0">Claim %</label><input type="number" id="fxClaim" value="85" min="0" max="100"></div>
       <div class="narrow"><label class="f" data-tip="fx.targetMin" tabindex="0">Target min</label><input type="number" id="fxTgtMin" value="1" min="1" max="99"></div>
       <div class="narrow"><label class="f" data-tip="fx.targetMax" tabindex="0">Target max</label><input type="number" id="fxTgtMax" value="20" min="1" max="200"></div>
+      <div><label class="f" data-tip="fx.chestMode" tabindex="0">Chest thresholds</label><select id="fxChestMode">
+        <option value="auto" selected>Auto — scale with what the run yields</option>
+        <option value="fixed">Fixed — absolute token levels</option>
+      </select></div>
     </div>
     <h3 style="margin-top:16px" data-tip="fx.types" tabindex="0">Which missions it may use</h3>
     <div class="btnrow" style="margin:0 0 10px">
@@ -3445,18 +3449,25 @@ function buildConfig(spec, rates, tierOf){
   }, 0));
 
   const tiers = [];
-  let cum = 0, prevReq = 0;
+  let cum = 0, cumConfigured = 0, prevReq = 0;
   dayList.forEach((d, i) => {
     cum += expByDay[i];
+    cumConfigured += d.missions.reduce((a, m) => a + m.tokens, 0);
     const chestShare = d.chest ? 0.6 : 0;
     const missionBudget = d.budget * (1 - chestShare);
     const payable = d.missions.filter(m => tierOf(m.type) !== 'easy');
     const per = payable.length ? missionBudget / payable.length : 0;
     payable.forEach(m => { m.bonusCash = Math.max(0.1, Math.round(per * 10) / 10); });
     if (d.chest){
-      // the chest for this day sits at the tokens the run is expected to have
-      // reached by the END of it, so "finish the day, get the chest" holds
-      const req = Math.max(prevReq + 1, Math.round(cum * 0.9));
+      // Where the chest sits decides whether difficulty moves cost at all.
+      //   auto  — at the tokens the run is EXPECTED to reach by the end of this day.
+      //           Harder targets yield fewer tokens, but the threshold drops with
+      //           them, so the reach rate — and the payout — barely changes.
+      //   fixed — at a share of the tokens the day CONFIGURES, difficulty-blind.
+      //           Now a harder config genuinely misses chests and costs less.
+      const req = spec.chestMode === 'fixed'
+        ? Math.max(prevReq + 1, Math.round(cumConfigured * 0.55))
+        : Math.max(prevReq + 1, Math.round(cum * 0.9));
       prevReq = req;
       tiers.push({tierUid: `tier_${tiers.length + 1}`, tokensRequired: req, day: i + 1,
         bonusCash: Math.max(0.1, Math.round(d.budget * chestShare * 10) / 10)});
@@ -3581,6 +3592,7 @@ const TIP = {
   'fx.dayBudget': '<span class="h">bonus cash $</span>Money this day hands out — split across its missions, and into its chest if it has one. This is the designed figure; what it actually pays depends on completion and is in the cost column.',
   'fx.dayChest': '<span class="h">chest</span>Whether a chest lands at the end of this day, set at the tokens the run is expected to have reached by then. Between 2 and 5 chests total (rule 11).',
   'fx.budgetmul': '<span class="h">Budget ×</span>Multiplier over the whole per-day money schedule. 0.5× halves every day, 2× doubles it — the shape you authored is kept, only the scale varies across the grid.',
+  'fx.chestMode': '<span class="h">Chest thresholds</span>Where the chests sit, and it decides whether difficulty moves your cost at all.<br><br><b>Auto</b> places each chest at the tokens the run is <i>expected</i> to reach. Harder targets yield fewer tokens, but the threshold drops with them, so the reach rate and the payout hardly change — cost then depends almost entirely on the budget axis.<br><br><b>Fixed</b> places them at absolute token levels, the same for every config. Now a harder config misses its chests and pays less: on one grid, cost fell from $3.36 to $0.48 across the difficulty axis while the budget stayed at $7.60.',
   'fx.mode': '<span class="h">Difficulty dial</span><b>Target completion %</b> solves each target so roughly that share of players finish it — say what you want and it works backwards. <b>Effort ×</b> asks for a share of the expected count instead, which fixes completion as a side effect: effort 1.0 always lands near 50%, because the target is the average.',
   'fx.completion': '<span class="h">Completion %</span>The share of players who should finish each mission. The grid varies it across the columns, so you see the whole difficulty range at once. Delivered completion runs a little under the asked figure — a mission that uncovers late gets less of the day than the solve assumed.',
   'fx.targetMin': '<span class="h">Target min</span>Floor on every generated target. 1 is the natural floor — a target of 0 is not a mission.',
@@ -5685,6 +5697,7 @@ function fxSpec(){
     targetMin: Math.max(1, +$('#fxTgtMin').value || 1),
     targetMax: Math.max(1, +$('#fxTgtMax').value || 20),
     mode: $('#fxMode').value,
+    chestMode: $('#fxChestMode').value,
     completionMin: (+$('#fxCompMin').value || 95) / 100,
     completionMax: (+$('#fxCompMax').value || 45) / 100,
     players: Math.max(50, +$('#fxPlayers').value || 400),
@@ -5707,6 +5720,12 @@ function renderFactoryHint(){
          actually open for, measured by a calibration pass — not the whole day, which they never get.`
       : 'Every mission is open from the start.'}
       Targets clamped to ${sp.targetMin}–${sp.targetMax}.
+      ${sp.chestMode === 'auto'
+        ? `<br><b>Auto chest thresholds:</b> they scale with what the run yields, so difficulty barely
+           moves the cost — only the budget axis does. Switch to <b>Fixed</b> if you want harder configs
+           to cost less.`
+        : `<br><b>Fixed chest thresholds:</b> the same absolute token levels for every config, so a
+           harder config misses its chests and genuinely pays less.`}
       <br>${sp.mode === 'completion'
         ? `Targets are solved so roughly the asked-for share of players finish each mission. The
            delivered figure lands slightly under it, because a mission that uncovers late gets less of
@@ -5715,7 +5734,7 @@ function renderFactoryHint(){
            construction — the target <i>is</i> the average. Use 0.4–0.6 for a chain most players clear,
            or switch the dial to target completion % and say it directly.`}`;
 }
-['#fxN','#fxCap','#fxVis','#fxComfort','#fxClaim','#fxTgtMin','#fxTgtMax',
+['#fxN','#fxCap','#fxVis','#fxComfort','#fxClaim','#fxTgtMin','#fxTgtMax','#fxChestMode',
  '#fxEffMin','#fxEffMax','#fxBudMin','#fxBudMax','#fxPlayers']
   .forEach(x => $(x).addEventListener('input', renderFactoryHint));
 
@@ -5741,7 +5760,7 @@ $('#fxGo').addEventListener('click', () => {
   setTimeout(() => {
     const t0 = Date.now();
     const base = {dailyCap: sp.dailyCap, visibleSlots: sp.visibleSlots,
-      dayPlan: sp.dayPlan, comfort: sp.comfort, pool, mode: sp.mode,
+      dayPlan: sp.dayPlan, comfort: sp.comfort, pool, mode: sp.mode, chestMode: sp.chestMode,
       completion: sp.completionMin,
       targetMin: sp.targetMin, targetMax: sp.targetMax};
     const grid = F.generateGrid(base, rates, tierOf, sp);
