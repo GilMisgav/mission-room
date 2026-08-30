@@ -175,7 +175,26 @@
   table.decks td.cards{white-space:nowrap;font-family:var(--mono);font-size:11px;
     letter-spacing:.4px;color:var(--cream);user-select:all;width:1%}
   table.decks td.txt{min-width:240px;max-width:none}
-  .hint{font-size:11.5px;color:var(--muted);margin-top:5px;line-height:1.55}
+  .typegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:5px 12px;
+    margin-bottom:10px}
+  .typegrid label{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11.5px;
+    color:var(--muted);cursor:pointer;padding:2px 0}
+  .typegrid label:hover{color:var(--text)}
+  .typegrid label.off{opacity:.4}
+  .typegrid input{width:auto;margin:0}
+  .typegrid .cat{grid-column:1/-1;font-family:var(--serif);font-style:italic;font-size:13px;
+    color:var(--gold);margin-top:8px}
+  .typegrid .rate{margin-left:auto;color:var(--muted);font-size:10.5px}
+    <h3 style="margin-top:16px" data-tip="fx.types" tabindex="0">Which missions it may use</h3>
+    <div class="btnrow" style="margin:0 0 10px">
+      <button class="act ghost sm" data-fxsel="playable">All playable</button>
+      <button class="act ghost sm" data-fxsel="easy">Easy only</button>
+      <button class="act ghost sm" data-fxsel="easymed">Easy + challenging-easy</button>
+      <button class="act ghost sm" data-fxsel="inmatch">Opening hand only</button>
+      <button class="act ghost sm" data-fxsel="none">Clear</button>
+    </div>
+    <div id="fxTypes"></div>
+    <h3 style="margin-top:16px" data-tip="fx.schedule" tabindex="0">Per-day schedule</h3>
   .spark{display:flex;align-items:flex-end;gap:2px;height:54px;margin-top:6px}
   .spark i{flex:1;background:var(--gold-dim);border-radius:1px 1px 0 0;min-height:1px;display:block}
   .spark i.on{background:var(--gold)}
@@ -486,17 +505,26 @@
       <div class="narrow"><label class="f" data-tip="cmp.days" tabindex="0">Days</label><input type="number" id="fxDays" value="3" min="1" max="14"></div>
       <div class="narrow"><label class="f" data-tip="b.dailyCap" tabindex="0">Missions / day</label><input type="number" id="fxCap" value="5" min="1" max="10"></div>
       <div class="narrow"><label class="f" data-tip="fx.visible" tabindex="0">Visible slots</label><input type="number" id="fxVis" value="3" min="1" max="10"></div>
-      <div class="narrow"><label class="f" data-tip="b.matches" tabindex="0">Matches / day</label><input type="number" id="fxMatches" value="8" min="1" max="60"></div>
       <div class="narrow"><label class="f" data-tip="cmp.comfort" tabindex="0">Comfort %</label><input type="number" id="fxComfort" value="70" min="0" max="100"></div>
-      <div class="narrow"><label class="f" data-tip="b.tierTokens" tabindex="0">Chests</label><input type="number" id="fxChests" value="3" min="2" max="5"></div>
       <div class="narrow"><label class="f" data-tip="bar.claim" tabindex="0">Claim %</label><input type="number" id="fxClaim" value="85" min="0" max="100"></div>
     </div>
+    <h3 style="margin-top:16px" data-tip="fx.types" tabindex="0">Which missions it may use</h3>
+    <div class="btnrow" style="margin:0 0 10px">
+      <button class="act ghost sm" data-fxsel="playable">All playable</button>
+      <button class="act ghost sm" data-fxsel="easy">Easy only</button>
+      <button class="act ghost sm" data-fxsel="easymed">Easy + challenging-easy</button>
+      <button class="act ghost sm" data-fxsel="inmatch">Opening hand only</button>
+      <button class="act ghost sm" data-fxsel="none">Clear</button>
+    </div>
+    <div id="fxTypes"></div>
+    <h3 style="margin-top:16px" data-tip="fx.schedule" tabindex="0">Per-day schedule</h3>
+    <div id="fxDayPlan"></div>
     <h3 style="margin-top:16px">What varies across the grid</h3>
     <div class="row">
       <div class="narrow"><label class="f" data-tip="fx.effort" tabindex="0">Effort from</label><input type="number" step="0.05" id="fxEffMin" value="0.4"></div>
       <div class="narrow"><label class="f" data-tip="fx.effort" tabindex="0">to</label><input type="number" step="0.05" id="fxEffMax" value="1.3"></div>
-      <div class="narrow"><label class="f" data-tip="fx.budget" tabindex="0">Budget $ from</label><input type="number" step="0.1" id="fxBudMin" value="0.5"></div>
-      <div class="narrow"><label class="f" data-tip="fx.budget" tabindex="0">to</label><input type="number" step="0.1" id="fxBudMax" value="4"></div>
+      <div class="narrow"><label class="f" data-tip="fx.budgetmul" tabindex="0">Budget × from</label><input type="number" step="0.1" id="fxBudMin" value="0.5"></div>
+      <div class="narrow"><label class="f" data-tip="fx.budgetmul" tabindex="0">to</label><input type="number" step="0.1" id="fxBudMax" value="2"></div>
       <div class="narrow"><label class="f" data-tip="fx.players" tabindex="0">Sim players</label><input type="number" id="fxPlayers" value="400" min="50" max="3000" step="50"></div>
       <div style="flex:0 0 auto"><button class="act" id="fxGo">Generate + simulate</button></div>
     </div>
@@ -3201,7 +3229,6 @@ function poissonSample(lambda, rng){
 // days:   [{missions:[{type,target,tokens,bonusCash}]}]
 // rates:  {type: expected events per match}
 function simulatePlayer(days, rates, opts, rng){
-  const matchesPerDay = opts.matchesPerDay;
   const visible = Math.max(1, opts.visibleSlots);
   const claimRate = opts.claimRate ?? 1;
 
@@ -3214,7 +3241,9 @@ function simulatePlayer(days, rates, opts, rng){
     let dayDone = 0, dayTokens = 0;
     served += day.missions.length;
 
-    for (let match = 1; match <= matchesPerDay; match++){
+    // each day carries its own match budget — a ramp is a normal thing to author
+    const dayMatches = day.matches != null ? day.matches : (opts.matchesPerDay || 8);
+    for (let match = 1; match <= dayMatches; match++){
       if (!active.length) break;                 // whole chain cleared early
       matches++;
       for (let i = active.length - 1; i >= 0; i--){
@@ -3289,62 +3318,84 @@ function simulateConfig(cfg, rates, opts){
 // effort  targets as a share of what the matches/day budget is expected to yield
 // budget  bonus cash per player the config is DESIGNED to pay (before completion)
 function buildConfig(spec, rates, tierOf){
-  const {days, dailyCap, visibleSlots, matchesPerDay, effort, budget, comfort} = spec;
+  const {dailyCap, effort, comfort} = spec;
+  // dayPlan is the authored shape: for each day, how many matches of effort it
+  // assumes and how much bonus cash it hands out. `effort` and `budgetMul` are the
+  // grid's two multipliers over that shape.
+  const plan = spec.dayPlan;
+  const budgetMul = spec.budgetMul ?? 1;
+  const days = plan.length;
   const pool = spec.pool;                       // playable types, easiest first
   const easy = pool.filter(t => tierOf(t) === 'easy');
   const mid  = pool.filter(t => tierOf(t) === 'medium');
   const hard = pool.filter(t => tierOf(t) === 'hard');
-  const nComfort = Math.round(dailyCap * comfort);
-
-  const used = new Set();
-  const draw = arr => { for (const t of arr) if (!used.has(t)) { used.add(t); return t; } return null; };
-  const pick = () => draw(easy) || draw(mid) || draw(hard) || pool[0];
-  const pickStretch = () => draw(hard) || draw(mid) || draw(easy) || pool[0];
-
+  // Rule 3: a type may not repeat WITHIN a chain, but days are free to reuse it.
+  // Tracking `used` across the whole run instead exhausts the pool and starts
+  // emitting duplicates inside a chain, which upload rejects.
+  const cap = Math.min(dailyCap, pool.length);
+  const nComfort = Math.round(cap * comfort);
   const TOKENS = {easy: 4, medium: 8, hard: 14};
+
+  // rotate the starting offset per day so days differ even from a small pool
+  const rot = (arr, k) => arr.length ? arr.slice(k % arr.length).concat(arr.slice(0, k % arr.length)) : arr;
+
   const dayList = [];
   for (let d = 0; d < days; d++){
+    const dayMatches = plan[d].matches;
+    const used = new Set();
+    const dEasy = rot(easy, d), dMid = rot(mid, d), dHard = rot(hard, d), dPool = rot(pool, d);
+    const draw = arr => { for (const t of arr) if (!used.has(t)) { used.add(t); return t; } return null; };
+    const any = () => draw(dPool);
+    const pick = () => draw(dEasy) || draw(dMid) || draw(dHard) || any();
+    const pickStretch = () => draw(dHard) || draw(dMid) || draw(dEasy) || any();
     const types = [];
     for (let i = 0; i < nComfort; i++) types.push(pick());
-    for (let i = nComfort; i < dailyCap; i++) types.push(pickStretch());
+    for (let i = nComfort; i < cap; i++) types.push(pickStretch());
+    // any() returns null once the pool is exhausted — drop the empties rather than
+    // repeat a type and have the whole file rejected
+    while (types.length && types[types.length - 1] == null) types.pop();
     // easiest first: the visible slots should open on something reachable, or the
     // chain stalls behind a mission nobody finishes and the tail never uncovers
-    types.sort((a, b) => (rates[b] || 0) - (rates[a] || 0));
-    dayList.push({missions: types.map((t, i) => {
-      const expected = (rates[t] || 0) * matchesPerDay;
-      const target = Math.max(1, Math.round(expected * effort));
-      return {index: i + 1, type: t, target, tokens: TOKENS[tierOf(t)] || 8, bonusCash: 0};
-    })});
+    const clean = types.filter(Boolean);
+    clean.sort((a, b) => (rates[b] || 0) - (rates[a] || 0));
+    dayList.push({matches: dayMatches, budget: plan[d].budget * budgetMul, chest: !!plan[d].chest,
+      missions: clean.map((t, i) => {
+        const expected = (rates[t] || 0) * dayMatches;
+        const target = Math.max(1, Math.round(expected * effort));
+        return {index: i + 1, type: t, target, tokens: TOKENS[tierOf(t)] || 8, bonusCash: 0};
+      })});
   }
 
-  // Split the budget: 40% paid per mission, 60% held back for the chests, so
-  // there is a reason to keep playing after the daily missions are done.
-  const allMissions = dayList.flatMap(d => d.missions);
-  const missionBudget = budget * 0.4, chestBudget = budget * 0.6;
-  const payable = allMissions.filter(m => tierOf(m.type) !== 'easy');
-  const per = payable.length ? missionBudget / payable.length : 0;
-  payable.forEach(m => { m.bonusCash = Math.max(0.1, Math.round(per * 10) / 10); });
-
-  // Chests sized off the tokens the run is EXPECTED to yield, not the configured
-  // total — otherwise the grand chest drifts out of reach as difficulty rises.
-  const expTokens = allMissions.reduce((a, m) => {
-    const lambda = (rates[m.type] || 0) * matchesPerDay;
+  // Each day's money is spent on that day. If the day carries a chest, part of it
+  // is held back for that chest so the day pays on completion AND on the bar
+  // reaching its mark; if it does not, the whole day's budget goes on its missions.
+  const expByDay = dayList.map(d => d.missions.reduce((a, m) => {
+    const lambda = (rates[m.type] || 0) * d.matches;
     return a + m.tokens * (lambda > 0 ? poissonTail(m.target, lambda) : 0);
-  }, 0);
-  const nT = spec.chests;
-  const shares = nT === 2 ? [0.40, 0.80] : nT === 3 ? [0.30, 0.60, 0.85]
-    : nT === 4 ? [0.22, 0.45, 0.68, 0.88] : [0.18, 0.36, 0.55, 0.74, 0.90];
-  const weights = shares.map((_, i) => Math.pow(2, i));
-  const wSum = weights.reduce((a, b) => a + b, 0);
-  let prev = 0;
-  const tiers = shares.map((f, i) => {
-    const req = Math.max(prev + 1, Math.round(expTokens * f));
-    prev = req;
-    return {tierUid: `tier_${i + 1}`, tokensRequired: req,
-      bonusCash: Math.max(0.1, Math.round(chestBudget * weights[i] / wSum * 10) / 10)};
+  }, 0));
+
+  const tiers = [];
+  let cum = 0, prevReq = 0;
+  dayList.forEach((d, i) => {
+    cum += expByDay[i];
+    const chestShare = d.chest ? 0.6 : 0;
+    const missionBudget = d.budget * (1 - chestShare);
+    const payable = d.missions.filter(m => tierOf(m.type) !== 'easy');
+    const per = payable.length ? missionBudget / payable.length : 0;
+    payable.forEach(m => { m.bonusCash = Math.max(0.1, Math.round(per * 10) / 10); });
+    if (d.chest){
+      // the chest for this day sits at the tokens the run is expected to have
+      // reached by the END of it, so "finish the day, get the chest" holds
+      const req = Math.max(prevReq + 1, Math.round(cum * 0.9));
+      prevReq = req;
+      tiers.push({tierUid: `tier_${tiers.length + 1}`, tokensRequired: req, day: i + 1,
+        bonusCash: Math.max(0.1, Math.round(d.budget * chestShare * 10) / 10)});
+    }
   });
 
-  return {days: dayList, tiers, expTokens: +expTokens.toFixed(1), spec};
+  const expTokens = expByDay.reduce((a, b) => a + b, 0);
+  return {days: dayList, tiers, dailyCap: cap, expTokens: +expTokens.toFixed(1),
+    expByDay: expByDay.map(v => +v.toFixed(1)), spec};
 }
 
 // Poisson tail P(X >= k), shared with the app's closed-form estimator
@@ -3369,10 +3420,11 @@ function generateGrid(base, rates, tierOf, opts){
   for (let r = 0; r < rows && out.length < n; r++){
     for (let c = 0; c < cols && out.length < n; c++){
       const effort = +lerp(opts.effortMin, opts.effortMax, c, cols).toFixed(3);
-      const budget = +lerp(opts.budgetMin, opts.budgetMax, r, rows).toFixed(2);
-      const spec = {...base, effort, budget};
+      const budgetMul = +lerp(opts.budgetMin, opts.budgetMax, r, rows).toFixed(3);
+      const spec = {...base, effort, budgetMul};
       const cfg = buildConfig(spec, rates, tierOf);
-      out.push({id: out.length + 1, effort, budget, cfg});
+      const budget = +cfg.days.reduce((a, d) => a + d.budget, 0).toFixed(2);
+      out.push({id: out.length + 1, effort, budgetMul, budget, cfg});
     }
   }
   return out;
@@ -3427,6 +3479,12 @@ const TIP = {
 
   // ── factory ──
   'nav.factory': '<span class="h">Factory</span>Generates a grid of complete configs and simulates every one, so you can compare 20–30 candidates on effort, cost and completion before committing to one.',
+  'fx.types': '<span class="h">Which missions it may use</span>The pool the generator draws from. Types that measure zero under the current suit model are disabled — they can never be chosen. A chain cannot repeat a type, so select at least as many as your missions/day.',
+  'fx.schedule': '<span class="h">Per-day schedule</span>Each day gets its own match budget and its own bonus cash. Ramp them however you like — a quiet day 1 and a heavy day 3 is a normal shape. A day with a chest holds 60% of its money back for it, so that day pays once for finishing the missions and again when the bar reaches the mark.',
+  'fx.dayMatches': '<span class="h">matches</span>How many matches this day assumes the player will play. Targets for that day are sized off it, and the simulation gives the player exactly this many.',
+  'fx.dayBudget': '<span class="h">bonus cash $</span>Money this day hands out — split across its missions, and into its chest if it has one. This is the designed figure; what it actually pays depends on completion and is in the cost column.',
+  'fx.dayChest': '<span class="h">chest</span>Whether a chest lands at the end of this day, set at the tokens the run is expected to have reached by then. Between 2 and 5 chests total (rule 11).',
+  'fx.budgetmul': '<span class="h">Budget ×</span>Multiplier over the whole per-day money schedule. 0.5× halves every day, 2× doubles it — the shape you authored is kept, only the scale varies across the grid.',
   'fx.count': '<span class="h">Configs</span>How many candidates to generate. They are laid out on a grid: effort varies across, budget varies down.',
   'fx.visible': '<span class="h">Visible slots</span>How many missions are open at once. The rest sit locked and covered, and one uncovers each time an open mission completes — so the tail of a chain only starts accruing after earlier missions finish. This is simulated properly, not approximated: a mission nobody completes blocks the slot behind it.',
   'fx.effort': '<span class="h">Effort</span>Targets as a share of what the matches/day budget is expected to yield. <b>0.4</b> most players clear; <b>1.0</b> is a coin flip by construction; <b>1.3</b> most will not finish.',
@@ -3729,7 +3787,7 @@ Promise.resolve().then(() => {
 function boot(){
   buildDefaultBundle();
   renderChips(); renderSuitAlert(); renderBank(); renderInventory(); fillTypeSelects(); renderBuilder(); renderMakerTargets();
-  renderFoot();
+  renderFoot(); fxSyncTypes(); fxSyncDayPlan();
   $('#bDate').value = new Date().toISOString().slice(0,10).replace(/-/g,'');
   $('#bSuitEcho').value = S.suit;
 }
@@ -3747,6 +3805,7 @@ if ($('#popseg')) $('#popseg').addEventListener('click', e => {
   $$('#popseg button').forEach(x => x.classList.toggle('on', x === b));
   S.stats = S.banks[S.pop];
   renderChips(); renderSuitAlert(); renderBank(); renderInventory(); renderBuilder(); renderFoot();
+  fxSyncTypes();
   S.dkRows = null; $('#dkTable').innerHTML = ''; $('#dkStats').innerHTML = ''; $('#dkHist').innerHTML = '';
   $('#dpOut').innerHTML = ''; $('#mkOut').innerHTML = '';
 });
@@ -3755,7 +3814,7 @@ $('#suitseg').addEventListener('click', e => {
   S.suit = b.dataset.s;
   $$('#suitseg button').forEach(x => x.classList.toggle('on', x === b));
   $('#bSuitEcho').value = S.suit;
-  renderSuitAlert(); renderBank(); renderInventory(); renderBuilder();
+  renderSuitAlert(); renderBank(); renderInventory(); renderBuilder(); fxSyncTypes();
   S.dkRows = null; $('#dkTable').innerHTML = ''; $('#dkStats').innerHTML = ''; $('#dkHist').innerHTML = '';
 });
 $('#nav').addEventListener('click', e => {
@@ -5377,6 +5436,113 @@ function renderPaddedDay(r){
 // ══════════════ FACTORY ══════════════
 let fxGrid = null, fxSort = {key: 'completionPct', dir: -1};
 
+// Which mission types the factory is allowed to draw from. Defaults to everything
+// playable under the current suit model and deck population; a type that measures
+// zero can never be chosen, so it is shown disabled rather than silently dropped.
+let fxTypes = null;
+function fxSyncTypes(){
+  const m = mdl(); if (!m) return;
+  const playable = E.BANK_TYPES.filter(t => m.types[t].per_deck > 0);
+  if (!fxTypes) fxTypes = new Set(playable);
+  else for (const t of [...fxTypes]) if (!m.types[t] || m.types[t].per_deck <= 0) fxTypes.delete(t);
+  renderFxTypes();
+}
+function renderFxTypes(){
+  const m = mdl(); if (!m) return;
+  const cats = [...new Set(E.BANK.map(b => b.cat))];
+  $('#fxTypes').innerHTML = `<div class="typegrid">` + cats.map(cat => {
+    const items = E.BANK.filter(b => b.cat === cat);
+    return `<div class="cat">${esc(cat)}</div>` + items.map(b => {
+      const st = m.types[b.type];
+      const dead = st.per_deck <= 0;
+      return `<label class="${dead ? 'off' : ''}"${dead ? tipOnly('tier.impossible') : ''}>
+        <input type="checkbox" data-t="${b.type}"${fxTypes.has(b.type) ? ' checked' : ''}${dead ? ' disabled' : ''}>
+        <span>${b.type}</span>
+        <span class="rate tier-${st.tier}">${dead ? 'never' : fmt(st.per_deck, 2) + '/match'}</span>
+      </label>`;
+    }).join('');
+  }).join('') + `</div>
+  <p class="hint" style="margin:0"><b>${fxTypes.size}</b> type${fxTypes.size === 1 ? '' : 's'} selected.
+  The generator fills each day's comfort slots from the easiest of these and the stretch slots from the
+  hardest, and puts the easiest in the open slots so the chain does not stall behind something nobody
+  finishes.${fxTypes.size < 3 ? ' <span style="color:var(--warn)">Pick at least a few, or every day repeats the same missions.</span>' : ''}</p>`;
+}
+$('#fxTypes').addEventListener('change', e => {
+  const c = e.target.closest('input[data-t]'); if (!c) return;
+  if (c.checked) fxTypes.add(c.dataset.t); else fxTypes.delete(c.dataset.t);
+  renderFxTypes(); renderFactoryHint();
+});
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-fxsel]'); if (!b) return;
+  const m = mdl(); if (!m) return;
+  const playable = E.BANK_TYPES.filter(t => m.types[t].per_deck > 0);
+  const pick = {
+    playable: playable,
+    easy: playable.filter(t => m.types[t].tier === 'easy'),
+    easymed: playable.filter(t => ['easy','medium'].includes(m.types[t].tier)),
+    inmatch: playable.filter(t => E.BANK_BY_TYPE[t].cat === 'Opening hand'),
+    none: [],
+  }[b.dataset.fxsel] || playable;
+  fxTypes = new Set(pick);
+  renderFxTypes(); renderFactoryHint();
+});
+
+// The per-day schedule: how much play each day assumes, how much money it pays,
+// and whether a chest lands at the end of it. Rebuilt whenever the day count moves,
+// preserving anything already typed.
+let fxDayPlan = [];
+function fxSyncDayPlan(){
+  const days = Math.max(1, Math.min(14, +$('#fxDays').value || 3));
+  const old = fxDayPlan;
+  fxDayPlan = Array.from({length: days}, (_, i) => old[i] || {
+    matches: 8, budget: 1, chest: days <= 5 ? true : (i + 1) % Math.ceil(days / 5) === 0,
+  });
+  // rule 11: between 2 and 5 chests
+  let n = fxDayPlan.filter(d => d.chest).length;
+  if (n < 2){ for (let i = fxDayPlan.length - 1; i >= 0 && n < 2; i--)
+    if (!fxDayPlan[i].chest){ fxDayPlan[i].chest = true; n++; } }
+  if (n > 5){ for (let i = 0; i < fxDayPlan.length && n > 5; i++)
+    if (fxDayPlan[i].chest){ fxDayPlan[i].chest = false; n--; } }
+  renderFxDayPlan();
+}
+function renderFxDayPlan(){
+  const chests = fxDayPlan.filter(d => d.chest).length;
+  const totalMatches = fxDayPlan.reduce((a, d) => a + (+d.matches || 0), 0);
+  const totalMoney = fxDayPlan.reduce((a, d) => a + (+d.budget || 0), 0);
+  $('#fxDayPlan').innerHTML = `
+    <div class="rowhead" style="grid-template-columns:56px 110px 110px 90px 1fr">
+      <span>day</span><span${tip('fx.dayMatches')}>matches</span>
+      <span${tip('fx.dayBudget')}>bonus cash $</span><span${tip('fx.dayChest')}>chest</span><span></span>
+    </div>
+    ${fxDayPlan.map((d, i) => `
+      <div class="missionrow" data-day="${i}" style="grid-template-columns:56px 110px 110px 90px 1fr">
+        <span class="ix">${i + 1}</span>
+        <input type="number" data-k="matches" value="${d.matches}" min="1" max="80">
+        <input type="number" step="0.1" data-k="budget" value="${d.budget}" min="0">
+        <select data-k="chest">
+          <option value="1"${d.chest ? ' selected' : ''}>yes</option>
+          <option value="0"${!d.chest ? ' selected' : ''}>no</option>
+        </select>
+        <span class="hint" style="margin:0">${d.chest
+          ? `pays $${fmt((+d.budget || 0) * 0.4, 2)} on the missions, $${fmt((+d.budget || 0) * 0.6, 2)} on the chest at the end of day ${i + 1}`
+          : `pays $${fmt(+d.budget || 0, 2)} across this day's missions`}</span>
+      </div>`).join('')}
+    <p class="hint" style="margin-top:8px">
+      <b>${totalMatches}</b> matches and <b>$${fmt(totalMoney, 2)}</b> across the run ·
+      <b>${chests}</b> chest${chests === 1 ? '' : 's'}
+      ${chests < 2 || chests > 5 ? '<span style="color:var(--lose)"> — rule 11 allows 2 to 5</span>' : ''}.
+      A day with a chest holds 60% of its money back for it, so the day pays once for finishing the
+      missions and again when the bar reaches that day's mark.</p>`;
+}
+$('#fxDayPlan').addEventListener('input', e => {
+  const f = e.target.closest('[data-k]'); if (!f) return;
+  const i = +f.closest('[data-day]').dataset.day;
+  const k = f.dataset.k;
+  fxDayPlan[i][k] = k === 'chest' ? f.value === '1' : +f.value;
+  renderFxDayPlan(); renderFactoryHint();
+});
+$('#fxDays').addEventListener('input', fxSyncDayPlan);
+
 function fxSpec(){
   const cap = Math.max(1, Math.min(10, +$('#fxCap').value || 5));
   return {
@@ -5384,9 +5550,9 @@ function fxSpec(){
     days: Math.max(1, +$('#fxDays').value || 3),
     dailyCap: cap,
     visibleSlots: Math.max(1, Math.min(cap, +$('#fxVis').value || 3)),
-    matchesPerDay: Math.max(1, +$('#fxMatches').value || 8),
+    dayPlan: fxDayPlan.map(d => ({matches: Math.max(1, +d.matches || 8),
+      budget: Math.max(0, +d.budget || 0), chest: !!d.chest})),
     comfort: (+$('#fxComfort').value || 70) / 100,
-    chests: Math.max(2, Math.min(5, +$('#fxChests').value || 3)),
     claimRate: (+$('#fxClaim').value || 85) / 100,
     players: Math.max(50, +$('#fxPlayers').value || 400),
     effortMin: +$('#fxEffMin').value || 0.4, effortMax: +$('#fxEffMax').value || 1.3,
@@ -5397,15 +5563,17 @@ function renderFactoryHint(){
   const sp = fxSpec();
   const m = mdl();
   const playable = m ? E.BANK_TYPES.filter(t => m.types[t].per_deck > 0).length : 0;
+  const tm = sp.dayPlan.reduce((a, d) => a + d.matches, 0);
+  const tb = sp.dayPlan.reduce((a, d) => a + d.budget, 0);
   $('#fxHint').innerHTML = `${sp.count} configs · ${sp.days} days × ${sp.dailyCap} missions,
-    ${sp.visibleSlots} open at a time · ${sp.matchesPerDay} matches/day ·
-    measured on <b>${esc((S.stats || {}).label || 'the deck pool')}</b> (${playable} playable types).
+    ${sp.visibleSlots} open at a time · ${tm} matches and $${fmt(tb, 2)} across the run ·
+    drawn from <b>${fxTypes ? fxTypes.size : 0}</b> selected of ${playable} playable types, measured on <b>${esc((S.stats || {}).label || 'the deck pool')}</b>.
     ${sp.visibleSlots < sp.dailyCap
       ? `<b>Only ${sp.visibleSlots} of ${sp.dailyCap} missions are open at once</b> — the rest uncover as
          earlier ones complete, so the tail may never be reached.`
       : 'Every mission is open from the start.'}`;
 }
-['#fxN','#fxDays','#fxCap','#fxVis','#fxMatches','#fxComfort','#fxChests','#fxClaim',
+['#fxN','#fxCap','#fxVis','#fxComfort','#fxClaim',
  '#fxEffMin','#fxEffMax','#fxBudMin','#fxBudMax','#fxPlayers']
   .forEach(x => $(x).addEventListener('input', renderFactoryHint));
 
@@ -5415,20 +5583,26 @@ $('#fxGo').addEventListener('click', () => {
   const sp = fxSpec();
   const rates = Object.fromEntries(E.BANK_TYPES.map(t => [t, m.types[t].per_deck]));
   const tierOf = t => m.types[t].tier;
-  const pool = E.BANK_TYPES.filter(t => m.types[t].per_deck > 0)
+  const pool = E.BANK_TYPES.filter(t => m.types[t].per_deck > 0 && fxTypes && fxTypes.has(t))
     .sort((a, b) => m.types[b].per_deck - m.types[a].per_deck);
-  if (!pool.length){ $('#fxOut').innerHTML = '<div class="alert">No playable types under this suit model.</div>'; return; }
+  if (!pool.length){ $('#fxOut').innerHTML = `<div class="alert"><h4>No mission types selected</h4>
+    <p>Pick at least one type above that can actually occur under the ${S.suit} suit model.</p></div>`; return; }
+  if (pool.length < sp.dailyCap){
+    $('#fxOut').innerHTML = `<div class="alert warn"><h4>Only ${pool.length} type${pool.length === 1 ? '' : 's'} selected for ${sp.dailyCap} slots</h4>
+      <p>A chain cannot repeat a type, so each day will reuse the same ones and days will look alike.
+      Select at least ${sp.dailyCap} to give every slot its own mission.</p></div>`;
+  }
 
   $('#fxOut').innerHTML = `<div class="loading">Generating ${sp.count} configs and simulating
     ${(sp.count * sp.players).toLocaleString()} players…</div>`;
   $('#fxDetail').innerHTML = '';
   setTimeout(() => {
     const t0 = Date.now();
-    const base = {days: sp.days, dailyCap: sp.dailyCap, visibleSlots: sp.visibleSlots,
-      matchesPerDay: sp.matchesPerDay, comfort: sp.comfort, chests: sp.chests, pool};
+    const base = {dailyCap: sp.dailyCap, visibleSlots: sp.visibleSlots,
+      dayPlan: sp.dayPlan, comfort: sp.comfort, pool};
     const grid = F.generateGrid(base, rates, tierOf, sp);
     grid.forEach(g => {
-      g.sim = F.simulateConfig(g.cfg, rates, {players: sp.players, matchesPerDay: sp.matchesPerDay,
+      g.sim = F.simulateConfig(g.cfg, rates, {players: sp.players,
         visibleSlots: sp.visibleSlots, claimRate: sp.claimRate, seed: 7 + g.id * 13});
     });
     fxGrid = {grid, sp, rates, tierOf};
@@ -5500,13 +5674,15 @@ function renderFactory(ms){
     generated: 'Mission Room config factory',
     deck_population: (S.stats || {}).label, suit_model: S.suit,
     shape: {days: sp.days, dailyCap: sp.dailyCap, visibleSlots: sp.visibleSlots,
-      matchesPerDay: sp.matchesPerDay, chests: sp.chests, claimRate: sp.claimRate},
+      dayPlan: sp.dayPlan, claimRate: sp.claimRate},
     configs: grid.map(g => ({id: g.id, effort: g.effort, budget_designed: g.budget,
       simulated: {completion: +g.sim.completionPct.toFixed(4), cleared: +g.sim.clearedPct.toFixed(4),
         matches: +g.sim.avgMatches.toFixed(2), bar_p10: g.sim.barP10, bar_p50: g.sim.barP50,
         bar_p90: g.sim.barP90, chests: +g.sim.avgChests.toFixed(3), grand: +g.sim.grandPct.toFixed(4),
         cost_per_player: +g.sim.costTotal.toFixed(3)},
-      days: g.cfg.days.map((d, i) => ({day: i + 1, missions: d.missions.map(m =>
+      days: g.cfg.days.map((d, i) => ({day: i + 1, matches: d.matches,
+        bonus_cash_budget: +d.budget.toFixed(2), chest_at_end: d.chest,
+        missions: d.missions.map(m =>
         ({index: m.index, type: m.type, target: m.target, mission_token: m.tokens,
           bonusCash: m.bonusCash || undefined}))})),
       progression: {numberOfDays: sp.days, tiers: g.cfg.tiers.map(t =>
@@ -5523,7 +5699,7 @@ function renderFactoryDetail(g){
     <h3>Config #${g.id} — effort ${g.effort.toFixed(2)}, budget $${g.budget.toFixed(2)}</h3>
     <div class="cards-grid" style="margin-bottom:14px">${statCards([
       ['gold', 'Completion', pct(g.sim.completionPct), 'of served missions', 'fx.compl'],
-      ['', 'Matches used', fmt(g.sim.avgMatches, 1), `of ${sp.matchesPerDay * sp.days} available`, 'e.effort'],
+      ['', 'Matches used', fmt(g.sim.avgMatches, 1), `of ${sp.dayPlan.reduce((a,d)=>a+d.matches,0)} available`, 'e.effort'],
       ['', 'Bar at end', `${fmt(g.sim.barP10,0)} / ${fmt(g.sim.barP50,0)} / ${fmt(g.sim.barP90,0)}`, 'p10 / p50 / p90 tokens', 'fx.bar'],
       ['win', 'Cost per player', '$' + fmt(g.sim.costTotal, 2), `$${fmt(g.sim.costMission,2)} missions + $${fmt(g.sim.costChest,2)} chests`, 'fx.cost'],
     ])}</div>
@@ -5577,15 +5753,18 @@ function loadFactoryConfig(g){
     configs: {['factory_' + g.id]: {
       configType: 'scripted',
       timing: {personal: {durationDays: sp.days, dailyWindowHours: 24}},
-      dailyMissions: {visibleSlots: sp.visibleSlots, dailyCap: sp.dailyCap},
+      dailyMissions: {visibleSlots: Math.min(sp.visibleSlots, g.cfg.dailyCap),
+        dailyCap: g.cfg.dailyCap},
       rotation, chains,
       progression: {numberOfDays: sp.days, tiers: g.cfg.tiers.map(t =>
         ({tokensRequired: t.tokensRequired, reward: {bonusCash: t.bonusCash}}))},
     }},
   };
-  S.matchesPerDay = sp.matchesPerDay;
-  $('#invMatches').value = sp.matchesPerDay;
-  if ($('#bMatches')) $('#bMatches').value = sp.matchesPerDay;
+  // the Builder works off one matches/day figure; use the schedule's average
+  const avgMatches = Math.round(sp.dayPlan.reduce((a, d) => a + d.matches, 0) / sp.dayPlan.length);
+  S.matchesPerDay = avgMatches;
+  $('#invMatches').value = avgMatches;
+  if ($('#bMatches')) $('#bMatches').value = avgMatches;
   renderBuilder();
   $$('#nav button[data-v]').forEach(x => x.classList.toggle('on', x.dataset.v === 'builder'));
   $$('.view').forEach(v => v.classList.toggle('on', v.dataset.v === 'builder'));
