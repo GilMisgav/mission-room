@@ -3677,9 +3677,15 @@ function buildConfig(spec, rates, tierOf){
       m.tokens = Math.max(1, Math.floor(exact));
       all.push({m, rem: exact - Math.floor(exact)});
     }));
+    // The floor of 1 can push a mission ABOVE its exact share, so the leftover can
+    // come out negative. Handing out extras only, and never taking one back, left a
+    // config a token or so away from the rate it reports.
     let short = Math.round(perMatch * work) - all.reduce((a2, x) => a2 + x.m.tokens, 0);
     all.sort((x, y) => y.rem - x.rem);
     for (let i = 0; i < all.length && short > 0; i++, short--) all[i].m.tokens++;
+    for (let i = all.length - 1; i >= 0 && short < 0; i--){
+      if (all[i].m.tokens > 1){ all[i].m.tokens--; short++; }   // never below the floor
+    }
     dayList.forEach(d => d.missions.forEach(m => {
       m.tokensPerMatch = +(m.tokens / Math.max(effortOf(m), 0.1)).toFixed(2);
     }));
