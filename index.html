@@ -3539,6 +3539,9 @@ function buildConfig(spec, rates, tierOf){
     ? mixedTail(k, rates[type] || 0, SPREAD[type] || 0, matches)
     : poissonTail(k, (rates[type] || 0) * matches);
 
+  const STRETCH = spec.targetStretch || 1.25;
+  const dayCeiling = (type, dayMatches) =>
+    Math.max(1, Math.floor((rates[type] || 0) * dayMatches * STRETCH));
   const MAXRATIO = spec.maxMatchRatio || 1.6;
   const canDo = (t, dayMatches) => {
     const rate = rates[t] || 0;
@@ -3547,6 +3550,12 @@ function buildConfig(spec, rates, tierOf){
     return (minTarget / rate) <= dayMatches * MAXRATIO;
   };
   const excluded = [], infeasible = [];
+  // How often this config has already leaned on each type, and a seeded stream for
+  // the variety picks. Both are per-config so a given variantSeed stays reproducible.
+  const seen = {};
+  let vs = ((spec.variantSeed || 1) * 7919 + 13) & 0x7fffffff;
+  const vrand = () => { vs = (vs * 1103515245 + 12345) & 0x7fffffff; return vs / 0x7fffffff; };
+  const pickOne = arr => arr[Math.floor(vrand() * arr.length)];
 
   const dayList = [];
   for (let d = 0; d < days; d++){
@@ -3578,13 +3587,56 @@ function buildConfig(spec, rates, tierOf){
     const dMid  = vr ? shuffle(kMid)  : rot(kMid, d);
     const dHard = vr ? shuffle(kHard) : rot(kHard, d);
     const dPool = vr ? shuffle(kPool) : rot(kPool, d);
-    const draw = arr => { for (const t of arr) if (!used.has(t)) { used.add(t); return t; } return null; };
-    const any = () => draw(dPool);
-    const pick = () => draw(dEasy) || draw(dMid) || draw(dHard) || any();
-    const pickStretch = () => draw(dHard) || draw(dMid) || draw(dEasy) || any();
+    // Draw the least-leaned-on type still available, breaking ties at random.
+    // Walking the bucket in order made every day re-serve the same handful of
+    // high-rate types: six of them carried 73% of all mission slots.
+    const take = t => { used.add(t); seen[t] = (seen[t] || 0) + 1; return t; };
+    const draw = arr => {
+      const free = arr.filter(t => !used.has(t));
+      if (!free.length) return null;
+      const least = Math.min(...free.map(t => seen[t] || 0));
+      return take(pickOne(free.filter(t => (seen[t] || 0) === least)));
+    };
+    // ── choosing the day's missions ──────────────────────────────────
+    // Two things make a chain feel repetitive, and picking by rate alone makes
+    // both worse. Rates span two orders of magnitude, so a greedy "easiest first"
+    // walk hands the same six types every day — and if you fix that by reserving
+    // slots for rare types, every reserved slot lands on target 1, which is the
+    // other kind of sameness.
+    //
+    // So select on the thing the player actually sees: a mix of types they have
+    // not just done, carrying targets that are not all the same number. Every
+    // candidate has already cleared canDo, so variety never costs reachability.
+    const targetOf = t => solveTargetForCompletion(
+      (rates[t] || 0) * dayMatches, spec.completion, spec,
+      dayCeiling(t, dayMatches), tailFor(t, dayMatches));
+    const tgtCache = {};
+    const tgt = t => (tgtCache[t] != null ? tgtCache[t] : (tgtCache[t] = targetOf(t)));
+
     const types = [];
-    for (let i = 0; i < nComfort; i++) types.push(pick());
-    for (let i = nComfort; i < cap; i++) types.push(pickStretch());
+    const chosenTargets = new Set();
+    const easeRank = kPool.slice().sort((x, y) => (rates[y] || 0) - (rates[x] || 0));
+    const easeOf = t => easeRank.indexOf(t) / Math.max(1, easeRank.length - 1);  // 0 easiest
+    for (let i = 0; i < cap; i++){
+      const free = kPool.filter(t => !used.has(t));
+      if (!free.length) break;
+      // the early slots should still open on something comfortable, the later ones
+      // are allowed to stretch — but this is a preference now, not a hard sort
+      const wantEase = i < nComfort ? 0 : 1;
+      let best = null, bestScore = -Infinity;
+      for (const t of free){
+        const score =
+            (chosenTargets.has(tgt(t)) ? 0 : 3)      // a target this chain lacks
+          - (seen[t] || 0) * 2                        // a type this config has rested
+          - Math.abs(easeOf(t) - wantEase)            // roughly the right difficulty
+          // Variety off means the grid is a controlled comparison: same chain
+          // everywhere, only the dials moving. Only jitter the ties when it is on.
+          + (vr ? vrand() * 0.5 : 0);
+        if (score > bestScore){ bestScore = score; best = t; }
+      }
+      chosenTargets.add(tgt(best));
+      types.push(take(best));
+    }
     // any() returns null once the pool is exhausted — drop the empties rather than
     // repeat a type and have the whole file rejected
     while (types.length && types[types.length - 1] == null) types.pop();
@@ -3592,6 +3644,16 @@ function buildConfig(spec, rates, tierOf){
     // chain stalls behind a mission nobody finishes and the tail never uncovers
     const clean = types.filter(Boolean);
     clean.sort((a, b) => (rates[b] || 0) - (rates[a] || 0));   // easiest first
+    // …but "easiest" does not have to mean "the highest-rate type in the bank".
+    // Sorting alone put one type in slot 1 on 69% of all days — the first thing
+    // every player saw was the same mission. Any type the day comfortably delivers
+    // can lead instead; the point of the sort is a reachable opener, not a fixed one.
+    const opener = clean.filter(t => tailFor(t, dayMatches)(minTarget) >= 0.85);
+    if (vr && opener.length > 1){
+      const lead = pickOne(opener);
+      clean.splice(clean.indexOf(lead), 1);
+      clean.unshift(lead);
+    }
     if (arc === 'gentle-ramp'){
       // keep the open slots reachable, then reverse the covered tail so the day
       // finishes on its hardest mission rather than opening with it
@@ -3627,9 +3689,6 @@ function buildConfig(spec, rates, tierOf){
   // its own will happily pick a target needing three times the day's matches when
   // that lands nearer the requested percentage — arithmetically closer, and unusable
   // as a mission. Cap every target at what STRETCH times the day's play can deliver.
-  const STRETCH = spec.targetStretch || 1.25;
-  const dayCeiling = (type, dayMatches) =>
-    Math.max(1, Math.floor((rates[type] || 0) * dayMatches * STRETCH));
 
   // ── token pricing ──────────────────────────────────────────────────
   // Tokens used to come from the mission's TIER alone, so on the same type a target
