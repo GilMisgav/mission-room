@@ -3255,7 +3255,7 @@ function simulatePlayer(days, rates, opts, rng, exposure, timing, curve){
 
   days.forEach((day, dayIdx) => {
     const queue = day.missions.map((m, slot) => ({m, slot}));
-    const active = queue.splice(0, visible).map(x => ({...x, got: 0, open: 0}));
+    const active = queue.splice(0, visible).map(x => ({...x, got: 0, open: 0, since: 1}));
     let dayDone = 0, dayTokens = 0, lastCompleteMatch = 0, lastMatchPlayed = 0;
     served += day.missions.length;
 
@@ -3269,7 +3269,16 @@ function simulatePlayer(days, rates, opts, rng, exposure, timing, curve){
       for (let i = active.length - 1; i >= 0; i--){
         const a = active[i];
         a.open++;
-        if (exposure) exposure[dayIdx][a.slot] += 1;
+        if (exposure && !a.counted){
+          a.counted = true;
+          // the matches this slot still has once it opens — not the matches it ends
+          // up using. Sizing a target on time-consumed is circular: a mission that
+          // finishes fast then looks like it only ever had that long, so its target
+          // can never grow and every slot collapses onto the same small number.
+          const e = exposure[dayIdx][a.slot];
+          e.window += (dayMatches - a.since + 1);
+          e.seen += 1;
+        }
         a.got += poissonSample(rates[a.m.type] || 0, rng);
         if (a.got >= a.m.target){
           if (timing){ timing[dayIdx][a.slot].done++; timing[dayIdx][a.slot].at += match; }
@@ -3282,7 +3291,8 @@ function simulatePlayer(days, rates, opts, rng, exposure, timing, curve){
             missionCash += a.m.bonusCash || 0;
           }
           active.splice(i, 1);
-          if (queue.length) active.push({...queue.shift(), got: 0, open: 0});   // uncover the next
+          // uncover the next, noting the match it opened on
+          if (queue.length) active.push({...queue.shift(), got: 0, open: 0, since: match + 1});
         }
       }
       // running state after this match: how much of the day is done, and what the
@@ -3326,9 +3336,13 @@ function simulatePlayer(days, rates, opts, rng, exposure, timing, curve){
 // to earn. One calibration pass measures the real window.
 function measureExposure(days, rates, opts, players, seed){
   const rng = E.mulberry32(seed || 99);
-  const exposure = days.map(d => new Array(d.missions.length).fill(0));
+  const exposure = days.map(d => d.missions.map(() => ({window: 0, seen: 0})));
   for (let p = 0; p < players; p++) simulatePlayer(days, rates, opts, rng, exposure);
-  return exposure.map(row => row.map(v => v / players));
+  // Average over the players who actually reached the slot. Including the ones who
+  // never uncovered it would drag the window toward zero and make its target
+  // trivial for everyone who does get there.
+  return exposure.map((row, di) => row.map(e =>
+    e.seen ? e.window / e.seen : days[di].matches));
 }
 
 // ── one config, many players ────────────────────────────────────────
